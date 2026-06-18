@@ -21,7 +21,7 @@ app.add_middleware(
 class ProcessRequest(BaseModel):
     image:       str
     target_size: int  = 1200
-    padding:     int  = 10
+    padding:     int  = 4
     sharpen:     bool = True
 
 # ── Health check ───────────────────────────────────────────
