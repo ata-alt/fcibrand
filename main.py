@@ -42,7 +42,8 @@ def process(req: ProcessRequest):
             image_input = req.image,
             target_size = req.target_size,
             padding     = req.padding,
-            sharpen     = req.sharpen
+            sharpen     = req.sharpen,
+            trim_white  = req.trim_white
         )
 
         return {
