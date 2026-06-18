@@ -21,9 +21,9 @@ app.add_middleware(
 class ProcessRequest(BaseModel):
     image:               str
     target_size:         int  = 1200
-    landscape_padding:   int  = 6     # ← landscape gets tight padding
-    portrait_padding:    int  = 10    # ← portrait gets slightly more
-    square_padding:      int  = 10    # ← square same as portrait
+    landscape_padding:   int  = 2     # ← landscape gets tight padding
+    portrait_padding:    int  = 5    # ← portrait gets slightly more
+    square_padding:      int  = 5    # ← square same as portrait
     sharpen:             bool = True
     trim_white:          bool = True
 
