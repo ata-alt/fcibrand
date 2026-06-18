@@ -2,7 +2,7 @@ import os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from processor import process_image
 from logger_config import setup_logger
 
@@ -20,12 +20,13 @@ app.add_middleware(
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
     image:               str
-    target_size:         int  = 1200
-    landscape_padding:   int  = 0     # ← landscape gets tight padding
-    portrait_padding:    int  = 1    # ← portrait gets slightly more
-    square_padding:      int  = 1    # ← square same as portrait
+    target_size:         int  = Field(default=1200, ge=100,  le=5000)
+    landscape_padding:   int  = Field(default=0,    ge=0,    le=200)
+    portrait_padding:    int  = Field(default=1,    ge=0,    le=200)
+    square_padding:      int  = Field(default=1,    ge=0,    le=200)
     sharpen:             bool = True
     trim_white:          bool = True
+    trim_tolerance:      int  = Field(default=50,   ge=10,   le=100)  # ← new
 
 # ── Health check ───────────────────────────────────────────
 @app.get("/")
@@ -49,7 +50,8 @@ def process(req: ProcessRequest):
             portrait_padding  = req.portrait_padding,
             square_padding    = req.square_padding,
             sharpen           = req.sharpen,
-            trim_white        = req.trim_white
+            trim_white        = req.trim_white,
+            trim_tolerance    = req.trim_tolerance   # ← add this
         )
 
         return {
