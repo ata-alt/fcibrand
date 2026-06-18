@@ -129,7 +129,7 @@ def process_image(
             output_buffer,
             format   = "JPEG",
             quality  = 90,
-            dpi      = (300, 300),
+            dpi      = (72, 72),
             optimize = True
         )
         output_buffer.seek(0)
