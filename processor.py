@@ -1,6 +1,6 @@
 import io
 import base64
-from PIL import Image, ImageFilter, ImageChops, ImageOps
+from PIL import Image, ImageFilter, ImageChops
 from logger_config import setup_logger
 
 logger = setup_logger("processor")
@@ -14,16 +14,9 @@ def trim_whitespace(img: Image.Image, threshold: int = 240) -> Image.Image:
       240 = near-white too (recommended for product images)
       220 = more aggressive
     """
-    # Work on RGB copy for detection
-    rgb = img.convert("RGB")
-
-    # Build a plain white background same size
-    bg = Image.new("RGB", rgb.size, (threshold, threshold, threshold))
-
-    # Find difference between image and white background
+    rgb  = img.convert("RGB")
+    bg   = Image.new("RGB", rgb.size, (threshold, threshold, threshold))
     diff = ImageChops.difference(rgb, bg)
-
-    # Get bounding box of non-white content
     bbox = diff.getbbox()
 
     if bbox:
@@ -36,23 +29,60 @@ def trim_whitespace(img: Image.Image, threshold: int = 240) -> Image.Image:
         return img
 
 
+def get_orientation(w: int, h: int) -> str:
+    """
+    Returns orientation based on aspect ratio.
+      landscape  → width > height
+      portrait   → height > width
+      square     → width == height
+    """
+    if w > h:
+        return "landscape"
+    elif h > w:
+        return "portrait"
+    else:
+        return "square"
+
+
+def get_padding(w: int, h: int,
+                landscape_padding: int,
+                portrait_padding:  int,
+                square_padding:    int) -> tuple:
+    """
+    Returns (padding, orientation) based on image dimensions.
+    """
+    orientation = get_orientation(w, h)
+    if orientation == "landscape":
+        return landscape_padding, orientation
+    elif orientation == "portrait":
+        return portrait_padding, orientation
+    else:
+        return square_padding, orientation
+
+
 def process_image(
-    image_input:  str,
-    target_size:  int  = 1200,
-    padding:      int  = 15,    # padding around product on final canvas
-    sharpen:      bool = True,
-    trim_white:   bool = True   # auto-trim source whitespace
+    image_input:        str,
+    target_size:        int  = 1200,
+    landscape_padding:  int  = 6,    # ← tight padding for landscape
+    portrait_padding:   int  = 10,   # ← slightly more for portrait
+    square_padding:     int  = 10,   # ← same as portrait for square
+    sharpen:            bool = True,
+    trim_white:         bool = True
 ) -> str:
     """
     FCI product image processing pipeline.
     Accepts base64 encoded image string.
     Returns base64 encoded JPEG string.
+    Padding is applied dynamically based on image orientation.
     """
 
     logger.info("=" * 60)
     logger.info("NEW IMAGE PROCESSING REQUEST STARTED")
     logger.info("=" * 60)
-    logger.debug(f"Params — target_size: {target_size}, padding: {padding}, "
+    logger.debug(f"Params — target_size: {target_size}, "
+                 f"landscape_padding: {landscape_padding}, "
+                 f"portrait_padding: {portrait_padding}, "
+                 f"square_padding: {square_padding}, "
                  f"sharpen: {sharpen}, trim_white: {trim_white}")
 
     # ── Step 1: Decode base64 ─────────────────────────────────
@@ -80,7 +110,7 @@ def process_image(
         logger.info("STEP 3 — Trimming existing whitespace...")
         try:
             size_before = img.size
-            img = trim_whitespace(img, threshold=240)
+            img         = trim_whitespace(img, threshold=240)
             size_after  = img.size
             logger.info(f"STEP 3 — OK | {size_before} → {size_after}")
         except Exception as e:
@@ -89,8 +119,25 @@ def process_image(
     else:
         logger.info("STEP 3 — SKIPPED | trim_white is false")
 
-    # ── Step 4: Resize with LANCZOS ───────────────────────────
-    logger.info("STEP 4 — Resizing with LANCZOS...")
+    # ── Step 4: Detect orientation + apply dynamic padding ────
+    logger.info("STEP 4 — Detecting orientation...")
+    try:
+        trimmed_w, trimmed_h = img.size
+        padding, orientation = get_padding(
+            trimmed_w, trimmed_h,
+            landscape_padding,
+            portrait_padding,
+            square_padding
+        )
+        logger.info(f"STEP 4 — OK | orientation: {orientation} | "
+                    f"size: {trimmed_w}x{trimmed_h} | "
+                    f"padding applied: {padding}px")
+    except Exception as e:
+        logger.error(f"STEP 4 — FAILED | {str(e)}")
+        raise
+
+    # ── Step 5: Resize with LANCZOS ───────────────────────────
+    logger.info("STEP 5 — Resizing with LANCZOS...")
     try:
         usable         = target_size - (padding * 2)
         orig_w, orig_h = img.size
@@ -103,27 +150,27 @@ def process_image(
         new_h = int(orig_h * ratio)
 
         img = img.resize((new_w, new_h), Image.LANCZOS)
-        logger.info(f"STEP 4 — OK | {orig_w}x{orig_h} → {new_w}x{new_h} | "
+        logger.info(f"STEP 5 — OK | {orig_w}x{orig_h} → {new_w}x{new_h} | "
                     f"ratio: {ratio:.3f} | "
                     f"{'kept original (no upscale)' if ratio == 1.0 else 'downscaled'}")
     except Exception as e:
-        logger.error(f"STEP 4 — FAILED | {str(e)}")
+        logger.error(f"STEP 5 — FAILED | {str(e)}")
         raise
 
-    # ── Step 5: Sharpen after resize ──────────────────────────
+    # ── Step 6: Sharpen after resize ──────────────────────────
     if sharpen:
-        logger.info("STEP 5 — Applying sharpening filter...")
+        logger.info("STEP 6 — Applying sharpening filter...")
         try:
             img = img.filter(ImageFilter.SHARPEN)
-            logger.info("STEP 5 — OK | sharpening applied")
+            logger.info("STEP 6 — OK | sharpening applied")
         except Exception as e:
-            logger.error(f"STEP 5 — FAILED | {str(e)}")
+            logger.error(f"STEP 6 — FAILED | {str(e)}")
             raise
     else:
-        logger.info("STEP 5 — SKIPPED | sharpen is false")
+        logger.info("STEP 6 — SKIPPED | sharpen is false")
 
-    # ── Step 6: Paste on white canvas with padding ────────────
-    logger.info("STEP 6 — Pasting on white canvas...")
+    # ── Step 7: Paste on white canvas ─────────────────────────
+    logger.info("STEP 7 — Pasting on white canvas...")
     try:
         canvas   = Image.new("RGB", (target_size, target_size), (255, 255, 255))
         offset_x = (target_size - new_w) // 2
@@ -135,16 +182,16 @@ def process_image(
             img = img.convert("RGB")
             canvas.paste(img, (offset_x, offset_y))
 
-        logger.info(f"STEP 6 — OK | canvas: {target_size}x{target_size} | "
+        logger.info(f"STEP 7 — OK | canvas: {target_size}x{target_size} | "
                     f"image: {new_w}x{new_h} | "
                     f"white padding — top: {offset_y}px, bottom: {offset_y}px, "
                     f"left: {offset_x}px, right: {offset_x}px")
     except Exception as e:
-        logger.error(f"STEP 6 — FAILED | {str(e)}")
+        logger.error(f"STEP 7 — FAILED | {str(e)}")
         raise
 
-    # ── Step 7: Save as JPEG q90, 150 DPI ─────────────────────
-    logger.info("STEP 7 — Saving as JPEG q90, 150 DPI...")
+    # ── Step 8: Save as JPEG q90, 150 DPI ─────────────────────
+    logger.info("STEP 8 — Saving as JPEG q90, 150 DPI...")
     try:
         output_buffer = io.BytesIO()
         canvas.save(
@@ -156,15 +203,15 @@ def process_image(
         )
         output_buffer.seek(0)
         size_kb = len(output_buffer.getvalue()) / 1024
-        logger.info(f"STEP 7 — OK | output size: {size_kb:.1f} KB")
+        logger.info(f"STEP 8 — OK | output size: {size_kb:.1f} KB")
     except Exception as e:
-        logger.error(f"STEP 7 — FAILED | {str(e)}")
+        logger.error(f"STEP 8 — FAILED | {str(e)}")
         raise
 
-    # ── Step 8: Encode to base64 ──────────────────────────────
-    logger.info("STEP 8 — Encoding to base64...")
+    # ── Step 9: Encode to base64 ──────────────────────────────
+    logger.info("STEP 9 — Encoding to base64...")
     encoded = base64.b64encode(output_buffer.getvalue()).decode("utf-8")
-    logger.info(f"STEP 8 — OK | base64 length: {len(encoded)} chars")
+    logger.info(f"STEP 9 — OK | base64 length: {len(encoded)} chars")
 
     logger.info("=" * 60)
     logger.info("REQUEST COMPLETED SUCCESSFULLY")
