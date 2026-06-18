@@ -1,5 +1,6 @@
 import io
 import base64
+import logging
 from PIL import Image, ImageFilter
 from logger_config import setup_logger
 
@@ -45,7 +46,7 @@ def process_image(
         logger.error(f"STEP 2 — FAILED | {str(e)}")
         raise
 
-    # ── Step 3: Optional crop ─────────────────────────────────
+    # ── Step 3: Optional crop to bbox ────────────────────────
     if crop_bbox:
         logger.info(f"STEP 3 — Cropping to bbox: {crop_bbox}...")
         try:
@@ -77,20 +78,27 @@ def process_image(
     # ── Step 5: Resize with LANCZOS ───────────────────────────
     logger.info("STEP 5 — Resizing with LANCZOS...")
     try:
-        usable        = target_size - (padding * 2)
+        usable         = target_size - (padding * 2)  # 1160px usable area
         orig_w, orig_h = img.size
-        ratio         = min(usable / orig_w, usable / orig_h)
-        new_w         = int(orig_w * ratio)
-        new_h         = int(orig_h * ratio)
+        ratio          = min(usable / orig_w, usable / orig_h)
+
+        # ✅ KEY FIX — never upscale beyond original resolution
+        # If image is already smaller than canvas, keep it at original size
+        # Upscaling a low-res image only makes it blurry and zoomed-in looking
+        ratio = min(ratio, 1.0)
+
+        new_w = int(orig_w * ratio)
+        new_h = int(orig_h * ratio)
 
         img = img.resize((new_w, new_h), Image.LANCZOS)
-        logger.info(f"STEP 5 — OK | {orig_w}x{orig_h} → {new_w}x{new_h} "
-                    f"(ratio: {ratio:.3f}, usable area: {usable}px)")
+        logger.info(f"STEP 5 — OK | {orig_w}x{orig_h} → {new_w}x{new_h} | "
+                    f"ratio: {ratio:.3f} | "
+                    f"{'kept original size (no upscale)' if ratio == 1.0 else 'downscaled'}")
     except Exception as e:
         logger.error(f"STEP 5 — FAILED | {str(e)}")
         raise
 
-    # ── Step 6: Sharpen ───────────────────────────────────────
+    # ── Step 6: Sharpen after resize ──────────────────────────
     if sharpen:
         logger.info("STEP 6 — Applying sharpening filter...")
         try:
@@ -102,7 +110,7 @@ def process_image(
     else:
         logger.info("STEP 6 — SKIPPED | sharpen is false")
 
-    # ── Step 7: Paste on white canvas ─────────────────────────
+    # ── Step 7: Paste on white canvas with padding ────────────
     logger.info("STEP 7 — Pasting on white canvas...")
     try:
         canvas   = Image.new("RGB", (target_size, target_size), (255, 255, 255))
@@ -116,20 +124,23 @@ def process_image(
             canvas.paste(img, (offset_x, offset_y))
 
         logger.info(f"STEP 7 — OK | canvas: {target_size}x{target_size} | "
-                    f"image offset: ({offset_x}, {offset_y})")
+                    f"image: {new_w}x{new_h} | "
+                    f"offset: ({offset_x}, {offset_y}) | "
+                    f"white padding — top: {offset_y}px, bottom: {offset_y}px, "
+                    f"left: {offset_x}px, right: {offset_x}px")
     except Exception as e:
         logger.error(f"STEP 7 — FAILED | {str(e)}")
         raise
 
-    # ── Step 8: Save as JPEG ──────────────────────────────────
-    logger.info("STEP 8 — Saving as JPEG q90, 300 DPI...")
+    # ── Step 8: Save as JPEG q90, 150 DPI ─────────────────────
+    logger.info("STEP 8 — Saving as JPEG q90, 150 DPI...")
     try:
         output_buffer = io.BytesIO()
         canvas.save(
             output_buffer,
             format   = "JPEG",
             quality  = 90,
-            dpi      = (72, 72),
+            dpi      = (150, 150),   # ✅ 72 too soft, 300 overkill — 150 is sweet spot
             optimize = True
         )
         output_buffer.seek(0)
