@@ -54,7 +54,7 @@ def process(req: ProcessRequest):
             "image":   base64_image,
             "format":  "JPEG",
             "size":    req.target_size,
-            "dpi":     300
+            "dpi":     72
         }
 
     except Exception as e:
