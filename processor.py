@@ -1,33 +1,35 @@
 import io
 import base64
 import logging
-import requests
 from PIL import Image, ImageFilter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 def process_image(
-    source_url:  str,
-    target_size: int   = 1000,
-    crop_bbox:   tuple = None,
-    remove_bg:   bool  = False,
-    padding:     int   = 20,
-    sharpen:     bool  = True
+    image_input:  str,
+    target_size:  int   = 1200,   # ← changed from 1000 to 1200
+    crop_bbox:    tuple = None,
+    remove_bg:    bool  = False,
+    padding:      int   = 20,
+    sharpen:      bool  = True
 ) -> str:
     """
     FCI product image processing pipeline.
+    Accepts base64 encoded image string.
     Returns base64 encoded JPEG string.
     """
 
-    # ── Step 1: Download source URL ──────────────────────────
-    logger.info(f"Downloading image from: {source_url}")
-    response = requests.get(source_url, timeout=30)
-    response.raise_for_status()
-    img = Image.open(io.BytesIO(response.content))
-    logger.info(f"Downloaded — original size: {img.size}, mode: {img.mode}")
+    # ── Step 1: Decode base64 to image ───────────────────────
+    logger.info("Decoding base64 image...")
+    try:
+        image_bytes = base64.b64decode(image_input)
+        img = Image.open(io.BytesIO(image_bytes))
+        logger.info(f"Decoded — original size: {img.size}, mode: {img.mode}")
+    except Exception as e:
+        raise Exception(f"Invalid base64 image: {str(e)}")
 
-    # ── Step 2: Open with Pillow ──────────────────────────────
+    # ── Step 2: Convert to RGBA ───────────────────────────────
     img = img.convert("RGBA")
 
     # ── Step 3: Optional crop to bbox ────────────────────────
