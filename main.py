@@ -21,7 +21,7 @@ app.add_middleware(
 class ProcessRequest(BaseModel):
     image:       str
     target_size: int  = 1200
-    padding:     int  = 40      # ← increased default since trim handles the rest
+    padding:     int  = 15      # ← increased default since trim handles the rest
     sharpen:     bool = True
     trim_white:  bool = True    # ← new param
 
