@@ -63,9 +63,9 @@ def get_padding(w: int, h: int,
 def process_image(
     image_input:        str,
     target_size:        int  = 1200,
-    landscape_padding:  int  = 2,    # ← tight padding for landscape
-    portrait_padding:   int  = 5,   # ← slightly more for portrait
-    square_padding:     int  = 5,   # ← same as portrait for square
+    landscape_padding:  int  = 0,    # ← tight padding for landscape
+    portrait_padding:   int  = 1,   # ← slightly more for portrait
+    square_padding:     int  = 1,   # ← same as portrait for square
     sharpen:            bool = True,
     trim_white:         bool = True
 ) -> str:
