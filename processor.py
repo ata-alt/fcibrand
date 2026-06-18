@@ -8,7 +8,7 @@ logger = setup_logger("processor")
 def process_image(
     image_input:  str,
     target_size:  int  = 1200,
-    padding:      int  = 20,
+    padding:      int  = 10,
     sharpen:      bool = True
 ) -> str:
     """
