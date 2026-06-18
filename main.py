@@ -21,10 +21,8 @@ app.add_middleware(
 
 class ProcessRequest(BaseModel):
     image:       str
-    target_size: int = 1200
-    crop_bbox:   Optional[List[int]] = None
-    remove_bg:   bool = False
-    padding:     int = 20
+    target_size: int  = 1200
+    padding:     int  = 20
     sharpen:     bool = True
 
 # ── Health check ───────────────────────────────────────────
@@ -43,8 +41,6 @@ def process(req: ProcessRequest):
         base64_image = process_image(
             image_input = req.image,
             target_size = req.target_size,
-            crop_bbox   = tuple(req.crop_bbox) if req.crop_bbox else None,
-            remove_bg   = req.remove_bg,
             padding     = req.padding,
             sharpen     = req.sharpen
         )
