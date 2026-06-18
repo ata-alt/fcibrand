@@ -1,12 +1,14 @@
+import os
 import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
 from typing import Optional, List
 from processor import process_image
+from logger_config import setup_logger
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = setup_logger("main")
 
 app = FastAPI(title="FCI Image Processor")
 
@@ -17,10 +19,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
     image:       str
-    target_size: int = 1200        # ← changed from 1000 to 1200
+    target_size: int = 1200
     crop_bbox:   Optional[List[int]] = None
     remove_bg:   bool = False
     padding:     int = 20
@@ -29,13 +30,15 @@ class ProcessRequest(BaseModel):
 # ── Health check ───────────────────────────────────────────
 @app.get("/")
 def health_check():
+    logger.info("Health check called")
     return {"status": "ok", "service": "fci-image-processor"}
 
 # ── Main processing endpoint ───────────────────────────────
 @app.post("/process")
 def process(req: ProcessRequest):
     try:
-        logger.info("Received image processing request")
+        logger.info(f"Received request — target_size: {req.target_size}, "
+                    f"remove_bg: {req.remove_bg}, sharpen: {req.sharpen}")
 
         base64_image = process_image(
             image_input = req.image,
@@ -55,5 +58,38 @@ def process(req: ProcessRequest):
         }
 
     except Exception as e:
-        logger.error(f"Processing failed: {str(e)}")
+        logger.error(f"Request failed — {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# ── Log viewer endpoint ────────────────────────────────────
+@app.get("/logs", response_class=PlainTextResponse)
+def view_logs(lines: int = 100):
+    """
+    View last N lines of the log file.
+    Usage: /logs        → last 100 lines
+           /logs?lines=50  → last 50 lines
+    """
+    log_file = "/tmp/logs/fci_processor.log"
+    try:
+        if not os.path.exists(log_file):
+            return "No log file found yet — make a request first."
+
+        with open(log_file, "r") as f:
+            all_lines = f.readlines()
+
+        last_n = all_lines[-lines:]
+        return "".join(last_n)
+
+    except Exception as e:
+        return f"Error reading log file: {str(e)}"
+
+# ── Clear logs endpoint ────────────────────────────────────
+@app.delete("/logs")
+def clear_logs():
+    log_file = "/tmp/logs/fci_processor.log"
+    try:
+        open(log_file, "w").close()
+        logger.info("Log file cleared")
+        return {"success": True, "message": "Logs cleared"}
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
