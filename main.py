@@ -4,7 +4,6 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel
-from typing import Optional, List
 from processor import process_image
 from logger_config import setup_logger
 
@@ -36,7 +35,7 @@ def health_check():
 def process(req: ProcessRequest):
     try:
         logger.info(f"Received request — target_size: {req.target_size}, "
-                    f"remove_bg: {req.remove_bg}, sharpen: {req.sharpen}")
+                    f"padding: {req.padding}, sharpen: {req.sharpen}")
 
         base64_image = process_image(
             image_input = req.image,
@@ -50,7 +49,7 @@ def process(req: ProcessRequest):
             "image":   base64_image,
             "format":  "JPEG",
             "size":    req.target_size,
-            "dpi":     72
+            "dpi":     150
         }
 
     except Exception as e:
