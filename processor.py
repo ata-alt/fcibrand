@@ -39,7 +39,7 @@ def trim_whitespace(img: Image.Image, threshold: int = 240) -> Image.Image:
 def process_image(
     image_input:  str,
     target_size:  int  = 1200,
-    padding:      int  = 40,    # padding around product on final canvas
+    padding:      int  = 15,    # padding around product on final canvas
     sharpen:      bool = True,
     trim_white:   bool = True   # auto-trim source whitespace
 ) -> str:
