@@ -1,5 +1,4 @@
 import os
-import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
@@ -18,12 +17,15 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
-    image:       str
-    target_size: int  = 1200
-    padding:     int  = 15      # ← increased default since trim handles the rest
-    sharpen:     bool = True
-    trim_white:  bool = True    # ← new param
+    image:               str
+    target_size:         int  = 1200
+    landscape_padding:   int  = 6     # ← landscape gets tight padding
+    portrait_padding:    int  = 10    # ← portrait gets slightly more
+    square_padding:      int  = 10    # ← square same as portrait
+    sharpen:             bool = True
+    trim_white:          bool = True
 
 # ── Health check ───────────────────────────────────────────
 @app.get("/")
@@ -36,14 +38,18 @@ def health_check():
 def process(req: ProcessRequest):
     try:
         logger.info(f"Received request — target_size: {req.target_size}, "
-                    f"padding: {req.padding}, sharpen: {req.sharpen}")
+                    f"landscape_padding: {req.landscape_padding}, "
+                    f"portrait_padding: {req.portrait_padding}, "
+                    f"sharpen: {req.sharpen}, trim_white: {req.trim_white}")
 
         base64_image = process_image(
-            image_input = req.image,
-            target_size = req.target_size,
-            padding     = req.padding,
-            sharpen     = req.sharpen,
-            trim_white  = req.trim_white
+            image_input       = req.image,
+            target_size       = req.target_size,
+            landscape_padding = req.landscape_padding,
+            portrait_padding  = req.portrait_padding,
+            square_padding    = req.square_padding,
+            sharpen           = req.sharpen,
+            trim_white        = req.trim_white
         )
 
         return {
@@ -58,29 +64,20 @@ def process(req: ProcessRequest):
         logger.error(f"Request failed — {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-# ── Log viewer endpoint ────────────────────────────────────
+# ── Log viewer ─────────────────────────────────────────────
 @app.get("/logs", response_class=PlainTextResponse)
 def view_logs(lines: int = 100):
-    """
-    View last N lines of the log file.
-    Usage: /logs        → last 100 lines
-           /logs?lines=50  → last 50 lines
-    """
     log_file = "/tmp/logs/fci_processor.log"
     try:
         if not os.path.exists(log_file):
             return "No log file found yet — make a request first."
-
         with open(log_file, "r") as f:
             all_lines = f.readlines()
-
-        last_n = all_lines[-lines:]
-        return "".join(last_n)
-
+        return "".join(all_lines[-lines:])
     except Exception as e:
         return f"Error reading log file: {str(e)}"
 
-# ── Clear logs endpoint ────────────────────────────────────
+# ── Clear logs ─────────────────────────────────────────────
 @app.delete("/logs")
 def clear_logs():
     log_file = "/tmp/logs/fci_processor.log"
