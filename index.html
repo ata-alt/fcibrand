@@ -1,0 +1,797 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>FCI Processor — Live Logs</title>
+    <style>
+        /* ── Tokens ───────────────────────────────────────────── */
+        :root {
+            --bg:          #0d1117;
+            --surface:     #161b22;
+            --surface2:    #21262d;
+            --border:      #30363d;
+            --accent:      #58a6ff;
+            --accent-dim:  #1f3a5f;
+            --green:       #3fb950;
+            --green-dim:   #1a3a24;
+            --yellow:      #d29922;
+            --yellow-dim:  #3d2f00;
+            --red:         #f85149;
+            --red-dim:     #3d1a19;
+            --text:        #e6edf3;
+            --text-muted:  #8b949e;
+            --text-dim:    #484f58;
+            --radius:      8px;
+            --font-mono:   "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
+            --font-ui:     -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            background: var(--bg);
+            color: var(--text);
+            font-family: var(--font-ui);
+            min-height: 100vh;
+            padding: 24px;
+        }
+
+        /* ── Header ───────────────────────────────────────────── */
+        .header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .header h1 {
+            font-size: 18px;
+            font-weight: 600;
+            color: var(--text);
+            letter-spacing: -0.3px;
+        }
+
+        .header p {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-top: 2px;
+        }
+
+        .live-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            background: var(--green-dim);
+            border: 1px solid var(--green);
+            color: var(--green);
+            font-size: 11px;
+            font-weight: 600;
+            padding: 4px 10px;
+            border-radius: 20px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .live-badge .dot {
+            width: 7px;
+            height: 7px;
+            background: var(--green);
+            border-radius: 50%;
+            animation: pulse 1.4s ease-in-out infinite;
+        }
+
+        .live-badge.paused {
+            background: var(--yellow-dim);
+            border-color: var(--yellow);
+            color: var(--yellow);
+        }
+
+        .live-badge.paused .dot {
+            background: var(--yellow);
+            animation: none;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; transform: scale(1); }
+            50%       { opacity: 0.4; transform: scale(0.8); }
+        }
+
+        /* ── Stats Bar ────────────────────────────────────────── */
+        .stats-bar {
+            display: flex;
+            gap: 12px;
+            margin-bottom: 16px;
+            flex-wrap: wrap;
+        }
+
+        .stat {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 10px 16px;
+            min-width: 110px;
+        }
+
+        .stat-label {
+            font-size: 11px;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.6px;
+            margin-bottom: 4px;
+        }
+
+        .stat-value {
+            font-size: 22px;
+            font-weight: 700;
+            font-family: var(--font-mono);
+            color: var(--text);
+            line-height: 1;
+        }
+
+        .stat-value.green  { color: var(--green); }
+        .stat-value.red    { color: var(--red); }
+        .stat-value.yellow { color: var(--yellow); }
+        .stat-value.blue   { color: var(--accent); }
+
+        /* ── Controls ─────────────────────────────────────────── */
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 7px 14px;
+            border-radius: 6px;
+            border: 1px solid var(--border);
+            background: var(--surface2);
+            color: var(--text);
+            font-size: 13px;
+            font-family: var(--font-ui);
+            cursor: pointer;
+            transition: background 0.15s, border-color 0.15s;
+            white-space: nowrap;
+        }
+
+        .btn:hover { background: var(--border); }
+
+        .btn.primary {
+            background: var(--accent-dim);
+            border-color: var(--accent);
+            color: var(--accent);
+        }
+        .btn.primary:hover { background: #1e4a80; }
+
+        .btn.danger {
+            background: var(--red-dim);
+            border-color: var(--red);
+            color: var(--red);
+        }
+        .btn.danger:hover { background: #5a1f1e; }
+
+        .btn.success {
+            background: var(--green-dim);
+            border-color: var(--green);
+            color: var(--green);
+        }
+
+        /* ── Filter Bar ───────────────────────────────────────── */
+        .filter-bar {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            align-items: center;
+        }
+
+        .filter-label {
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-right: 4px;
+        }
+
+        .filter-btn {
+            padding: 4px 12px;
+            border-radius: 20px;
+            border: 1px solid var(--border);
+            background: transparent;
+            color: var(--text-muted);
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+
+        .filter-btn:hover { color: var(--text); border-color: var(--text-muted); }
+        .filter-btn.active-all    { background: var(--surface2); color: var(--text); border-color: var(--text-dim); }
+        .filter-btn.active-info   { background: var(--accent-dim); color: var(--accent); border-color: var(--accent); }
+        .filter-btn.active-error  { background: var(--red-dim); color: var(--red); border-color: var(--red); }
+        .filter-btn.active-warn   { background: var(--yellow-dim); color: var(--yellow); border-color: var(--yellow); }
+        .filter-btn.active-debug  { background: var(--green-dim); color: var(--green); border-color: var(--green); }
+
+        .search-input {
+            margin-left: auto;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-family: var(--font-mono);
+            font-size: 12px;
+            padding: 5px 12px;
+            width: 220px;
+            outline: none;
+        }
+
+        .search-input:focus { border-color: var(--accent); }
+        .search-input::placeholder { color: var(--text-dim); }
+
+        /* ── Log Window ───────────────────────────────────────── */
+        .log-window {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
+        }
+
+        .log-window-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 16px;
+            border-bottom: 1px solid var(--border);
+            background: var(--surface2);
+        }
+
+        .log-window-title {
+            font-size: 12px;
+            color: var(--text-muted);
+            font-family: var(--font-mono);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .log-count {
+            background: var(--border);
+            color: var(--text-muted);
+            font-size: 11px;
+            padding: 1px 8px;
+            border-radius: 10px;
+        }
+
+        .autoscroll-toggle {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: var(--text-muted);
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .toggle {
+            width: 32px;
+            height: 18px;
+            background: var(--border);
+            border-radius: 9px;
+            position: relative;
+            transition: background 0.2s;
+        }
+
+        .toggle.on { background: var(--green); }
+
+        .toggle::after {
+            content: '';
+            position: absolute;
+            width: 14px;
+            height: 14px;
+            background: white;
+            border-radius: 50%;
+            top: 2px;
+            left: 2px;
+            transition: left 0.2s;
+        }
+
+        .toggle.on::after { left: 16px; }
+
+        .log-body {
+            height: 500px;
+            overflow-y: auto;
+            padding: 8px 0;
+            font-family: var(--font-mono);
+            font-size: 12.5px;
+            line-height: 1.6;
+            scroll-behavior: smooth;
+        }
+
+        /* ── Log Lines ────────────────────────────────────────── */
+        .log-line {
+            display: flex;
+            gap: 0;
+            padding: 1px 16px;
+            transition: background 0.1s;
+        }
+
+        .log-line:hover { background: var(--surface2); }
+
+        .log-line.hidden { display: none; }
+
+        .log-line.highlight { background: rgba(88, 166, 255, 0.08); }
+
+        .log-num {
+            color: var(--text-dim);
+            min-width: 40px;
+            user-select: none;
+            text-align: right;
+            margin-right: 16px;
+            flex-shrink: 0;
+        }
+
+        .log-ts {
+            color: var(--text-dim);
+            margin-right: 12px;
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+
+        .log-level {
+            font-weight: 700;
+            margin-right: 12px;
+            flex-shrink: 0;
+            min-width: 52px;
+        }
+
+        .log-level.INFO  { color: var(--accent); }
+        .log-level.ERROR { color: var(--red); }
+        .log-level.WARN  { color: var(--yellow); }
+        .log-level.DEBUG { color: var(--green); }
+        .log-level.OTHER { color: var(--text-muted); }
+
+        .log-source {
+            color: var(--text-muted);
+            margin-right: 12px;
+            flex-shrink: 0;
+        }
+
+        .log-msg {
+            color: var(--text);
+            word-break: break-all;
+            flex: 1;
+        }
+
+        .log-msg .ok-tag    { color: var(--green); font-weight: 600; }
+        .log-msg .fail-tag  { color: var(--red); font-weight: 600; }
+        .log-msg .skip-tag  { color: var(--yellow); font-weight: 600; }
+        .log-msg .sep-line  { color: var(--text-dim); }
+        .log-msg .req-tag   { color: var(--accent); font-weight: 600; }
+        .log-msg .search-hl { background: rgba(210, 153, 34, 0.3); border-radius: 2px; }
+
+        /* ── Empty / Error States ─────────────────────────────── */
+        .empty-state {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 200px;
+            color: var(--text-muted);
+            gap: 8px;
+        }
+
+        .empty-state .icon { font-size: 32px; }
+        .empty-state p { font-size: 13px; }
+
+        /* ── Footer ───────────────────────────────────────────── */
+        .footer {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-top: 12px;
+            font-size: 12px;
+            color: var(--text-muted);
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+
+        .footer-right { display: flex; gap: 16px; }
+
+        /* ── Scrollbar ────────────────────────────────────────── */
+        .log-body::-webkit-scrollbar { width: 6px; }
+        .log-body::-webkit-scrollbar-track { background: transparent; }
+        .log-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+        .log-body::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+        /* ── Interval selector ────────────────────────────────── */
+        .interval-select {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            color: var(--text);
+            font-size: 12px;
+            padding: 5px 10px;
+            cursor: pointer;
+            outline: none;
+        }
+        .interval-select:focus { border-color: var(--accent); }
+    </style>
+</head>
+<body>
+
+<!-- ── Header ──────────────────────────────────────────────── -->
+<div class="header">
+    <div class="header-left">
+        <div>
+            <h1>🛋️ FCI Image Processor — Live Logs</h1>
+            <p id="apiUrlDisplay">server-production-fc37.up.railway.app</p>
+        </div>
+    </div>
+    <div id="liveBadge" class="live-badge">
+        <span class="dot"></span> Live
+    </div>
+</div>
+
+<!-- ── Stats ───────────────────────────────────────────────── -->
+<div class="stats-bar">
+    <div class="stat">
+        <div class="stat-label">Total Lines</div>
+        <div class="stat-value blue" id="statTotal">0</div>
+    </div>
+    <div class="stat">
+        <div class="stat-label">Info</div>
+        <div class="stat-value" id="statInfo">0</div>
+    </div>
+    <div class="stat">
+        <div class="stat-label">Errors</div>
+        <div class="stat-value red" id="statError">0</div>
+    </div>
+    <div class="stat">
+        <div class="stat-label">Warnings</div>
+        <div class="stat-value yellow" id="statWarn">0</div>
+    </div>
+    <div class="stat">
+        <div class="stat-label">Debug</div>
+        <div class="stat-value green" id="statDebug">0</div>
+    </div>
+    <div class="stat">
+        <div class="stat-label">Last Updated</div>
+        <div class="stat-value blue" style="font-size:14px" id="statLastUpdate">—</div>
+    </div>
+</div>
+
+<!-- ── Controls ────────────────────────────────────────────── -->
+<div class="controls">
+    <button class="btn primary" onclick="fetchLogs()">🔄 Refresh Now</button>
+    <button class="btn" id="pauseBtn" onclick="togglePause()">⏸ Pause</button>
+    <button class="btn danger" onclick="clearLogs()">🗑 Clear Logs</button>
+    <button class="btn" onclick="downloadLogs()">⬇ Download</button>
+    <label class="filter-label" style="margin-left:8px">Interval:</label>
+    <select class="interval-select" id="intervalSelect" onchange="changeInterval()">
+        <option value="3000">3s</option>
+        <option value="5000" selected>5s</option>
+        <option value="10000">10s</option>
+        <option value="30000">30s</option>
+    </select>
+    <label class="filter-label" style="margin-left:8px">Lines:</label>
+    <select class="interval-select" id="linesSelect" onchange="fetchLogs()">
+        <option value="50">50</option>
+        <option value="100" selected>100</option>
+        <option value="200">200</option>
+        <option value="500">500</option>
+    </select>
+</div>
+
+<!-- ── Filter Bar ──────────────────────────────────────────── -->
+<div class="filter-bar">
+    <span class="filter-label">Filter:</span>
+    <button class="filter-btn active-all" data-filter="ALL"   onclick="setFilter('ALL')">All</button>
+    <button class="filter-btn"            data-filter="INFO"  onclick="setFilter('INFO')">Info</button>
+    <button class="filter-btn"            data-filter="ERROR" onclick="setFilter('ERROR')">Error</button>
+    <button class="filter-btn"            data-filter="WARN"  onclick="setFilter('WARN')">Warning</button>
+    <button class="filter-btn"            data-filter="DEBUG" onclick="setFilter('DEBUG')">Debug</button>
+    <input  class="search-input" id="searchInput"
+            placeholder="Search logs..."
+            oninput="applySearch()" />
+</div>
+
+<!-- ── Log Window ──────────────────────────────────────────── -->
+<div class="log-window">
+    <div class="log-window-header">
+        <div class="log-window-title">
+            📄 fci_processor.log
+            <span class="log-count" id="logCount">0 lines</span>
+        </div>
+        <label class="autoscroll-toggle" onclick="toggleAutoscroll()">
+            Auto-scroll
+            <div class="toggle on" id="autoscrollToggle"></div>
+        </label>
+    </div>
+    <div class="log-body" id="logBody">
+        <div class="empty-state">
+            <span class="icon">📭</span>
+            <p>No logs yet — waiting for first fetch...</p>
+        </div>
+    </div>
+</div>
+
+<!-- ── Footer ──────────────────────────────────────────────── -->
+<div class="footer">
+    <span id="footerStatus">Ready</span>
+    <div class="footer-right">
+        <span>Showing: <strong id="footerShowing">0</strong> lines</span>
+        <span>Filter: <strong id="footerFilter">ALL</strong></span>
+        <span id="footerNextUpdate">Next refresh in 5s</span>
+    </div>
+</div>
+
+<!-- ── Script ──────────────────────────────────────────────── -->
+<script>
+    const API_URL      = "https://server-production-fc37.up.railway.app";
+    let allLogLines    = [];
+    let activeFilter   = "ALL";
+    let searchQuery    = "";
+    let autoscroll     = true;
+    let paused         = false;
+    let refreshTimer   = null;
+    let countdownTimer = null;
+    let countdownSecs  = 5;
+    let intervalMs     = 5000;
+
+    // ── Fetch logs from Railway ────────────────────────────────
+    async function fetchLogs() {
+        const lines = document.getElementById("linesSelect").value;
+        try {
+            const res  = await fetch(`${API_URL}/logs?lines=${lines}`);
+            const text = await res.text();
+
+            if (text.trim() === "" || text.includes("No log file found")) {
+                allLogLines = [];
+                renderEmpty("No logs yet — make a request to the /process endpoint first.");
+            } else {
+                allLogLines = text.trim().split("\n").filter(l => l.trim() !== "");
+                renderLogs();
+            }
+
+            updateStats();
+            document.getElementById("statLastUpdate").innerText = nowTime();
+            document.getElementById("footerStatus").innerText   = `Last fetched at ${nowTime()}`;
+
+        } catch (err) {
+            document.getElementById("footerStatus").innerText = `⚠️ Fetch failed: ${err.message}`;
+        }
+    }
+
+    // ── Parse a single log line ────────────────────────────────
+    function parseLine(raw) {
+        // Format: 2026-06-18 08:41:22 | INFO     | processor | message
+        const match = raw.match(
+            /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\s*\|\s*(\w+)\s*\|\s*(\w+)\s*\|\s*(.*)$/
+        );
+        if (match) {
+            return {
+                ts:     match[1],
+                level:  match[2].trim(),
+                source: match[3].trim(),
+                msg:    match[4].trim(),
+                raw
+            };
+        }
+        return { ts: "", level: "OTHER", source: "", msg: raw, raw };
+    }
+
+    // ── Colour-code message text ───────────────────────────────
+    function formatMsg(msg, search) {
+        let out = msg
+            .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+
+        // Tag coloring
+        out = out.replace(/(—\s*OK\b)/g,    '<span class="ok-tag">$1</span>');
+        out = out.replace(/(—\s*FAILED\b)/g,'<span class="fail-tag">$1</span>');
+        out = out.replace(/(—\s*SKIPPED\b)/g,'<span class="skip-tag">$1</span>');
+        out = out.replace(/(={3,})/g,        '<span class="sep-line">$1</span>');
+        out = out.replace(/(NEW IMAGE PROCESSING REQUEST STARTED|REQUEST COMPLETED SUCCESSFULLY)/g,
+                          '<span class="req-tag">$1</span>');
+
+        // Search highlight
+        if (search) {
+            const escaped = search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const re = new RegExp(`(${escaped})`, "gi");
+            out = out.replace(re, '<span class="search-hl">$1</span>');
+        }
+        return out;
+    }
+
+    // ── Render all log lines ───────────────────────────────────
+    function renderLogs() {
+        const body = document.getElementById("logBody");
+        if (allLogLines.length === 0) {
+            renderEmpty("No logs yet — make a request to the /process endpoint first.");
+            return;
+        }
+
+        let html     = "";
+        let showing  = 0;
+
+        allLogLines.forEach((raw, i) => {
+            const p = parseLine(raw);
+            const levelClass = ["INFO","ERROR","WARN","WARNING","DEBUG"].includes(p.level)
+                               ? (p.level === "WARNING" ? "WARN" : p.level)
+                               : "OTHER";
+
+            const matchesFilter = activeFilter === "ALL" || levelClass === activeFilter;
+            const matchesSearch = searchQuery === "" ||
+                                  raw.toLowerCase().includes(searchQuery.toLowerCase());
+
+            const hidden = (!matchesFilter || !matchesSearch) ? "hidden" : "";
+            if (!hidden) showing++;
+
+            const tsShort = p.ts ? p.ts.split(" ")[1] : ""; // show only HH:MM:SS
+
+            html += `
+            <div class="log-line ${hidden}" data-level="${levelClass}" data-raw="${encodeURIComponent(raw)}">
+                <span class="log-num">${i + 1}</span>
+                <span class="log-ts">${tsShort}</span>
+                <span class="log-level ${levelClass}">${levelClass === "OTHER" ? "····" : levelClass}</span>
+                ${p.source ? `<span class="log-source">${p.source}</span>` : ""}
+                <span class="log-msg">${formatMsg(p.msg, searchQuery)}</span>
+            </div>`;
+        });
+
+        body.innerHTML = html;
+
+        document.getElementById("logCount").innerText    = `${allLogLines.length} lines`;
+        document.getElementById("footerShowing").innerText = showing;
+
+        if (autoscroll) {
+            body.scrollTop = body.scrollHeight;
+        }
+    }
+
+    function renderEmpty(msg) {
+        const body = document.getElementById("logBody");
+        body.innerHTML = `
+            <div class="empty-state">
+                <span class="icon">📭</span>
+                <p>${msg}</p>
+            </div>`;
+        document.getElementById("logCount").innerText     = "0 lines";
+        document.getElementById("footerShowing").innerText = "0";
+    }
+
+    // ── Stats ──────────────────────────────────────────────────
+    function updateStats() {
+        let info = 0, error = 0, warn = 0, debug = 0;
+        allLogLines.forEach(raw => {
+            const p = parseLine(raw);
+            if (p.level === "INFO")               info++;
+            else if (p.level === "ERROR")          error++;
+            else if (p.level === "WARN" || p.level === "WARNING") warn++;
+            else if (p.level === "DEBUG")          debug++;
+        });
+        document.getElementById("statTotal").innerText = allLogLines.length;
+        document.getElementById("statInfo").innerText  = info;
+        document.getElementById("statError").innerText = error;
+        document.getElementById("statWarn").innerText  = warn;
+        document.getElementById("statDebug").innerText = debug;
+    }
+
+    // ── Filter ─────────────────────────────────────────────────
+    function setFilter(f) {
+        activeFilter = f;
+        document.querySelectorAll(".filter-btn").forEach(b => {
+            b.className = "filter-btn";
+            if (b.dataset.filter === f) b.classList.add(`active-${f.toLowerCase()}`);
+        });
+        document.getElementById("footerFilter").innerText = f;
+        renderLogs();
+    }
+
+    // ── Search ─────────────────────────────────────────────────
+    function applySearch() {
+        searchQuery = document.getElementById("searchInput").value;
+        renderLogs();
+    }
+
+    // ── Autoscroll toggle ──────────────────────────────────────
+    function toggleAutoscroll() {
+        autoscroll = !autoscroll;
+        document.getElementById("autoscrollToggle").classList.toggle("on", autoscroll);
+    }
+
+    // ── Pause / Resume ─────────────────────────────────────────
+    function togglePause() {
+        paused = !paused;
+        const btn   = document.getElementById("pauseBtn");
+        const badge = document.getElementById("liveBadge");
+        if (paused) {
+            btn.innerText = "▶ Resume";
+            badge.classList.add("paused");
+            badge.innerHTML = '<span class="dot"></span> Paused';
+            clearInterval(refreshTimer);
+            clearInterval(countdownTimer);
+            document.getElementById("footerNextUpdate").innerText = "Paused";
+        } else {
+            btn.innerText = "⏸ Pause";
+            badge.classList.remove("paused");
+            badge.innerHTML = '<span class="dot"></span> Live';
+            startAutoRefresh();
+            fetchLogs();
+        }
+    }
+
+    // ── Clear logs ─────────────────────────────────────────────
+    async function clearLogs() {
+        if (!confirm("Clear all logs on the server?")) return;
+        try {
+            await fetch(`${API_URL}/logs`, { method: "DELETE" });
+            allLogLines = [];
+            renderEmpty("Logs cleared.");
+            updateStats();
+        } catch (err) {
+            alert("Could not clear logs: " + err.message);
+        }
+    }
+
+    // ── Download logs ──────────────────────────────────────────
+    function downloadLogs() {
+        const text = allLogLines.join("\n");
+        const blob = new Blob([text], { type: "text/plain" });
+        const link = document.createElement("a");
+        link.href  = URL.createObjectURL(blob);
+        link.download = `fci_logs_${nowStamp()}.txt`;
+        link.click();
+    }
+
+    // ── Auto-refresh ───────────────────────────────────────────
+    function startAutoRefresh() {
+        clearInterval(refreshTimer);
+        clearInterval(countdownTimer);
+
+        countdownSecs = intervalMs / 1000;
+        refreshTimer = setInterval(() => {
+            if (!paused) {
+                fetchLogs();
+                countdownSecs = intervalMs / 1000;
+            }
+        }, intervalMs);
+
+        countdownTimer = setInterval(() => {
+            if (!paused) {
+                countdownSecs--;
+                document.getElementById("footerNextUpdate").innerText =
+                    `Next refresh in ${countdownSecs}s`;
+            }
+        }, 1000);
+    }
+
+    function changeInterval() {
+        intervalMs = parseInt(document.getElementById("intervalSelect").value);
+        if (!paused) startAutoRefresh();
+    }
+
+    // ── Helpers ────────────────────────────────────────────────
+    function nowTime() {
+        return new Date().toLocaleTimeString();
+    }
+
+    function nowStamp() {
+        return new Date().toISOString().replace(/[:.]/g,"-").slice(0,19);
+    }
+
+    // ── Init ───────────────────────────────────────────────────
+    fetchLogs();
+    startAutoRefresh();
+</script>
+</body>
+</html>
