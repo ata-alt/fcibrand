@@ -1,15 +1,15 @@
-import io
-import base64
-import requests
+import logging
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional, List
 from processor import process_image
 
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = FastAPI(title="FCI Image Processor")
 
-# Allow your JS server to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -19,14 +19,14 @@ app.add_middleware(
 
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
-    source_url:  str
-    target_size: int = 1000
-    crop_bbox:   Optional[List[int]] = None  # [x1, y1, x2, y2]
+    image:       str
+    target_size: int = 1200        # ← changed from 1000 to 1200
+    crop_bbox:   Optional[List[int]] = None
     remove_bg:   bool = False
     padding:     int = 20
     sharpen:     bool = True
 
-# ── Health check (Railway uses this to confirm app is live) ──
+# ── Health check ───────────────────────────────────────────
 @app.get("/")
 def health_check():
     return {"status": "ok", "service": "fci-image-processor"}
@@ -35,8 +35,10 @@ def health_check():
 @app.post("/process")
 def process(req: ProcessRequest):
     try:
+        logger.info("Received image processing request")
+
         base64_image = process_image(
-            source_url  = req.source_url,
+            image_input = req.image,
             target_size = req.target_size,
             crop_bbox   = tuple(req.crop_bbox) if req.crop_bbox else None,
             remove_bg   = req.remove_bg,
@@ -52,7 +54,6 @@ def process(req: ProcessRequest):
             "dpi":     300
         }
 
-    except requests.exceptions.RequestException as e:
-        raise HTTPException(status_code=400, detail=f"Failed to download image: {str(e)}")
     except Exception as e:
+        logger.error(f"Processing failed: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
