@@ -113,7 +113,8 @@ def process_image(
     portrait_padding:   int  = 1,
     square_padding:     int  = 1,
     sharpen:            bool = True,
-    trim_white:         bool = True
+    trim_white:         bool = True,
+    trim_tolerance:     int  = 50    # ← increase from 30 to 50
 ) -> str:
     """
     FCI product image processing pipeline.
@@ -155,11 +156,12 @@ def process_image(
         logger.info("STEP 3 — Smart trimming background...")
         try:
             size_before = img.size
-            img         = trim_whitespace(img, tolerance=30)
+            img         = trim_whitespace(img, tolerance=trim_tolerance)  # ← use param
             size_after  = img.size
             logger.info(f"STEP 3 — OK | {size_before} → {size_after} | "
                         f"removed: {size_before[0]-size_after[0]}px W, "
-                        f"{size_before[1]-size_after[1]}px H")
+                        f"{size_before[1]-size_after[1]}px H | "
+                        f"tolerance used: {trim_tolerance}")
         except Exception as e:
             logger.error(f"STEP 3 — FAILED | {str(e)}")
             raise
