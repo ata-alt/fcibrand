@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from typing import Literal
+from typing import Optional
 from processor import process_image
 from logger_config import setup_logger
 
@@ -28,18 +28,16 @@ IMAGE_TYPE_MAP = {
 
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
-    image:             str
-    image_type:        Literal[
-                           "studio_clean",
-                           "studio_clean_light",
-                           "studio_shadow",
-                           "lifestyle"
-                       ]
-    target_size:       int  = Field(default=1200, ge=100, le=5000)
-    landscape_padding: int  = Field(default=0,    ge=0,   le=200)
-    portrait_padding:  int  = Field(default=1,    ge=0,   le=200)
-    square_padding:    int  = Field(default=1,    ge=0,   le=200)
-    sharpen:           bool = True
+    image:               str
+    studio_clean:        Optional[str] = None
+    studio_clean_light:  Optional[str] = None
+    studio_shadow:       Optional[str] = None
+    lifestyle:           Optional[str] = None
+    target_size:         int  = Field(default=1200, ge=100, le=5000)
+    landscape_padding:   int  = Field(default=0,    ge=0,   le=200)
+    portrait_padding:    int  = Field(default=1,    ge=0,   le=200)
+    square_padding:      int  = Field(default=1,    ge=0,   le=200)
+    sharpen:             bool = True
 
 # ── Health check ───────────────────────────────────────────
 @app.get("/")
@@ -51,15 +49,29 @@ def health_check():
 @app.post("/process")
 def process(req: ProcessRequest):
     try:
-        # Map image_type → trim_white
-        trim_white = IMAGE_TYPE_MAP[req.image_type]
+        # ── Determine which image_type field is populated ──────
+        image_type = None
+        for field in ["studio_clean", "studio_clean_light", "studio_shadow", "lifestyle"]:
+            val = getattr(req, field)
+            if val is not None and str(val).strip() != "":
+                image_type = field
+                break
 
-        logger.info(f"Received request — image_type: {req.image_type} | "
+        if image_type is None:
+            raise ValueError(
+                "No image_type field populated. "
+                "Expected one of: studio_clean, studio_clean_light, "
+                "studio_shadow, lifestyle to have a value."
+            )
+
+        trim_white = IMAGE_TYPE_MAP[image_type]
+
+        logger.info(f"Received request — image_type: {image_type} | "
                     f"trim_white: {trim_white} | "
-                    f"target_size: {req.target_size}, "
-                    f"landscape_padding: {req.landscape_padding}, "
-                    f"portrait_padding: {req.portrait_padding}, "
-                    f"square_padding: {req.square_padding}, "
+                    f"target_size: {req.target_size} | "
+                    f"landscape_padding: {req.landscape_padding} | "
+                    f"portrait_padding: {req.portrait_padding} | "
+                    f"square_padding: {req.square_padding} | "
                     f"sharpen: {req.sharpen}")
 
         base64_image = process_image(
@@ -71,15 +83,17 @@ def process(req: ProcessRequest):
             sharpen           = req.sharpen,
             trim_white        = trim_white,
         )
+
         return {
             "success":    True,
             "image":      base64_image,
             "format":     "JPEG",
             "size":       req.target_size,
             "dpi":        150,
-            "image_type": req.image_type,
+            "image_type": image_type,
             "trim_white": trim_white
         }
+
     except Exception as e:
         logger.error(f"Request failed — {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
