@@ -114,7 +114,7 @@ def process_image(
     square_padding:     int  = 1,
     sharpen:            bool = True,
     trim_white:         bool = True,
-    trim_tolerance:     int  = 50    # ← increase from 30 to 50
+    trim_tolerance:     int  = 40    # ← increase from 30 to 50
 ) -> str:
     """
     FCI product image processing pipeline.
