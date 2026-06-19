@@ -184,15 +184,15 @@ def process_image(
         logger.error(f"STEP 7 — FAILED | {str(e)}")
         raise
 
-    # ── Step 8: Save as JPEG q90, 150 DPI ─────────────────────
-    logger.info("STEP 8 — Saving as JPEG q90, 150 DPI...")
+    # ── Step 8: Save as JPEG q90, 72 DPI ─────────────────────
+    logger.info("STEP 8 — Saving as JPEG q90, 72 DPI...")
     try:
         output_buffer = io.BytesIO()
         canvas.save(
             output_buffer,
             format   = "JPEG",
             quality  = 90,
-            dpi      = (150, 150),
+            dpi      = (72, 72),
             optimize = True
         )
         output_buffer.seek(0)
