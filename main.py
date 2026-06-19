@@ -3,6 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
+from typing import Literal
 from processor import process_image
 from logger_config import setup_logger
 
@@ -17,16 +18,28 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ── image_type → trim_white mapping ───────────────────────
+IMAGE_TYPE_MAP = {
+    "studio_clean":       True,   # real alpha or rembg, reliable trim
+    "studio_clean_light": False,  # skip trim, avoid light-edge clipping
+    "studio_shadow":      False,  # skip trim, preserve shadow
+    "lifestyle":          False,  # skip trim, background intentional
+}
+
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
     image:             str
+    image_type:        Literal[
+                           "studio_clean",
+                           "studio_clean_light",
+                           "studio_shadow",
+                           "lifestyle"
+                       ]
     target_size:       int  = Field(default=1200, ge=100, le=5000)
     landscape_padding: int  = Field(default=0,    ge=0,   le=200)
     portrait_padding:  int  = Field(default=1,    ge=0,   le=200)
     square_padding:    int  = Field(default=1,    ge=0,   le=200)
     sharpen:           bool = True
-    trim_white:        bool = True
-    # trim_tolerance removed — no longer used by processor
 
 # ── Health check ───────────────────────────────────────────
 @app.get("/")
@@ -38,11 +51,17 @@ def health_check():
 @app.post("/process")
 def process(req: ProcessRequest):
     try:
-        logger.info(f"Received request — target_size: {req.target_size}, "
+        # Map image_type → trim_white
+        trim_white = IMAGE_TYPE_MAP[req.image_type]
+
+        logger.info(f"Received request — image_type: {req.image_type} | "
+                    f"trim_white: {trim_white} | "
+                    f"target_size: {req.target_size}, "
                     f"landscape_padding: {req.landscape_padding}, "
                     f"portrait_padding: {req.portrait_padding}, "
                     f"square_padding: {req.square_padding}, "
-                    f"sharpen: {req.sharpen}, trim_white: {req.trim_white}")
+                    f"sharpen: {req.sharpen}")
+
         base64_image = process_image(
             image_input       = req.image,
             target_size       = req.target_size,
@@ -50,14 +69,16 @@ def process(req: ProcessRequest):
             portrait_padding  = req.portrait_padding,
             square_padding    = req.square_padding,
             sharpen           = req.sharpen,
-            trim_white        = req.trim_white,
+            trim_white        = trim_white,
         )
         return {
-            "success": True,
-            "image":   base64_image,
-            "format":  "JPEG",
-            "size":    req.target_size,
-            "dpi":     150
+            "success":    True,
+            "image":      base64_image,
+            "format":     "JPEG",
+            "size":       req.target_size,
+            "dpi":        150,
+            "image_type": req.image_type,
+            "trim_white": trim_white
         }
     except Exception as e:
         logger.error(f"Request failed — {str(e)}")
