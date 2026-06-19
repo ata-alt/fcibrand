@@ -19,14 +19,14 @@ app.add_middleware(
 
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
-    image:               str
-    target_size:         int  = Field(default=1200, ge=100,  le=5000)
-    landscape_padding:   int  = Field(default=0,    ge=0,    le=200)
-    portrait_padding:    int  = Field(default=1,    ge=0,    le=200)
-    square_padding:      int  = Field(default=1,    ge=0,    le=200)
-    sharpen:             bool = True
-    trim_white:          bool = True
-    trim_tolerance:      int  = Field(default=50,   ge=10,   le=100)  # ← new
+    image:             str
+    target_size:       int  = Field(default=1200, ge=100, le=5000)
+    landscape_padding: int  = Field(default=0,    ge=0,   le=200)
+    portrait_padding:  int  = Field(default=1,    ge=0,   le=200)
+    square_padding:    int  = Field(default=1,    ge=0,   le=200)
+    sharpen:           bool = True
+    trim_white:        bool = True
+    # trim_tolerance removed — no longer used by processor
 
 # ── Health check ───────────────────────────────────────────
 @app.get("/")
@@ -41,8 +41,8 @@ def process(req: ProcessRequest):
         logger.info(f"Received request — target_size: {req.target_size}, "
                     f"landscape_padding: {req.landscape_padding}, "
                     f"portrait_padding: {req.portrait_padding}, "
+                    f"square_padding: {req.square_padding}, "
                     f"sharpen: {req.sharpen}, trim_white: {req.trim_white}")
-
         base64_image = process_image(
             image_input       = req.image,
             target_size       = req.target_size,
@@ -51,9 +51,7 @@ def process(req: ProcessRequest):
             square_padding    = req.square_padding,
             sharpen           = req.sharpen,
             trim_white        = req.trim_white,
-            trim_tolerance    = req.trim_tolerance   # ← add this
         )
-
         return {
             "success": True,
             "image":   base64_image,
@@ -61,7 +59,6 @@ def process(req: ProcessRequest):
             "size":    req.target_size,
             "dpi":     150
         }
-
     except Exception as e:
         logger.error(f"Request failed — {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
