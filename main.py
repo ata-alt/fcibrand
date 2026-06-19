@@ -89,7 +89,7 @@ def process(req: ProcessRequest):
             "image":      base64_image,
             "format":     "JPEG",
             "size":       req.target_size,
-            "dpi":        150,
+            "dpi":        72,
             "image_type": image_type,
             "trim_white": trim_white
         }
