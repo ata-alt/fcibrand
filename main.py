@@ -29,10 +29,10 @@ IMAGE_TYPE_MAP = {
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
     image:               str
-    studio_clean:        Optional[str] = None
-    studio_clean_light:  Optional[str] = None
-    studio_shadow:       Optional[str] = None
-    lifestyle:           Optional[str] = None
+    studio_clean:        Optional[bool] = None
+    studio_clean_light:  Optional[bool] = None
+    studio_shadow:       Optional[bool] = None
+    lifestyle:           Optional[bool] = None
     target_size:         int  = Field(default=1200, ge=100, le=5000)
     landscape_padding:   int  = Field(default=0,    ge=0,   le=200)
     portrait_padding:    int  = Field(default=1,    ge=0,   le=200)
@@ -49,19 +49,19 @@ def health_check():
 @app.post("/process")
 def process(req: ProcessRequest):
     try:
-        # ── Determine which image_type field is populated ──────
+        # ── Determine which image_type field is True ───────────
+        # OpenClaw sends booleans — exactly one should be True
         image_type = None
         for field in ["studio_clean", "studio_clean_light", "studio_shadow", "lifestyle"]:
-            val = getattr(req, field)
-            if val is not None and str(val).strip() != "":
+            if getattr(req, field) is True:
                 image_type = field
                 break
 
         if image_type is None:
             raise ValueError(
-                "No image_type field populated. "
-                "Expected one of: studio_clean, studio_clean_light, "
-                "studio_shadow, lifestyle to have a value."
+                "No image_type field is True. "
+                "Expected exactly one of: studio_clean, studio_clean_light, "
+                "studio_shadow, lifestyle to be true."
             )
 
         trim_white = IMAGE_TYPE_MAP[image_type]
