@@ -43,7 +43,9 @@ _STOP = {
     'More','Each','Only','Both','Same','They','Their','Will','Been',
     # Italian/French/German common words
     'Qui','Con','Per','Nel','Una','Uno','Del','Dei','Delle','Che',
-    'Tavolo','Tavola','Piano','Sedia','Sedie','Poltrona',
+    'Tavolo','Tavola','Piano','Sedia','Sedie','Poltrona','Seduta',
+    'Non','Solo','Piede','Piedi','Bronzo','Satin','Brass',
+    'Legs','Canna','Please','You','Covering','Stitching',
     'Bett','Tisch','Stuhl','Sofa',
     # Furniture model/product names that match TitleCase but are NOT codes
     'Flair','Vully','Atlas','Gemini','Tuka','Etienne','Mid',
@@ -56,22 +58,50 @@ _STOP = {
     'Leather','Similpelle','Kunstleder','Cuir',
     'Wood','Legno','Holz','Bois','Glass','Vetro',
     'Stone','Pietra','Ceramic','Ceramica',
-    'Made','Order','Note','View','More',
+    'Made','Order','Note','Notes','View',
+    # Geographic / company noise
+    'ITALY','NC','BA','CA','NY','UK','USA',
+    'Road','House','City','State','Model','Phone',
+    # Technical drawing / schematic labels
+    'FRONT','DEPTH','FRONTALE','LATERALE',
+    'Legend','Legenda','Ratio','Scala','Scale',
+    'POUF','Pouf','Back','Front','Depth',
 }
+
+# Typographic + ASCII quote chars used for inch measurements
+_QUOTE_CHARS = {'"', '\u201c', '\u201d', '\u2019', '\u2018'}
 
 def _is_swatch_code(text: str) -> bool:
     """True if text looks like a finish/material code rather than prose."""
     t = text.strip().rstrip('.')
     if len(t) < 2 or len(t) > 8:           return False
     if t in _STOP:                          return False
-    if ',' in t or '.' in t:               return False
+    if not re.match(r'^[A-Za-z0-9.]+$', t): return False   # must be alphanumeric
+    if any(c in _QUOTE_CHARS for c in t):   return False   # inch dims: 37”
+    if ',' in t or ':' in t or '%' in t:   return False
+    if '.' in t:                                            # allow Cod.XX only
+        if re.match(r'^[A-Za-z]{2,4}\.\d{1,2}$', t): pass
+        else: return False
     if re.match(r'^CB\d+', t):             return False   # SKUs: CB2348
     if re.match(r'^[HS][HX]?\d+', t):     return False   # H97, SH65
     if re.match(r'^\d+$', t):             return False   # page numbers
-    if re.search(r'\d', t):               return True    # P15, T3H, P2C
-    if t.isupper() and 2 <= len(t) <= 5:  return True    # GTG, SKZ, GMA
+    if re.search(r'\d', t):               return True    # P15, T3H, Cod.50
+    if t.isupper() and 2 <= len(t) <= 4:  return True    # GTG, SKZ (not ITALY)
     if t[0].isupper() and t[1:].islower() and 3 <= len(t) <= 6:
-        return True                                       # Cros, Harry
+        return True                                        # Cros, Harry
+    return False
+
+
+def _is_scoring_code(text: str) -> bool:
+    """
+    Stricter version used only for PAGE SCORING.
+    Requires digit in code OR ≤4 char all-uppercase.
+    Filters out place/company names (Parchi, Calia, Inc) and prose (Cros, Harry).
+    """
+    if not _is_swatch_code(text): return False
+    t = text.strip().rstrip('.')
+    if re.search(r'\d', t):               return True   # P15, T3H, Cod.50
+    if t.isupper() and len(t) <= 4:       return True   # GTG, SKZ (not ITALY=5)
     return False
 
 
@@ -134,13 +164,14 @@ def _score_page(pdf_bytes: bytes, page_num: int) -> float:
     if total_words < 8:
         return -999.0   # full-bleed photo page
 
-    unique_codes = len(set(w['text'] for w in words if _is_swatch_code(w['text'])))
-    swatch_rows  = _count_swatch_rows(circles[0] if circles is not None else None)
+    unique_codes = list(set(w['text'] for w in words if _is_scoring_code(w['text'])))
+    if len(unique_codes) < 3:
+        return -999.0   # need ≥3 distinct codes — cover/address pages disqualified
 
-    # Both signals must be present — multiply to require both
-    score = float(swatch_rows * 25 + unique_codes * 15)
-    if total_words > 300:
-        score -= 40   # text-heavy pages are unlikely swatch pages
+    swatch_rows  = _count_swatch_rows(circles[0] if circles is not None else None)
+    row_bonus    = min(swatch_rows, 6) * 25    # cap benefit at 6 rows
+    row_penalty  = max(0, swatch_rows - 6) * 15  # penalise schematics (10-15+ rows)
+    score = float(row_bonus - row_penalty + len(unique_codes) * 15)
 
     return score
 
@@ -221,7 +252,7 @@ def _category(cy_px: float, words: list, roi_y1: int, roi_y2: int) -> str:
 
 # ── OpenCV extraction ─────────────────────────────────────────────────────────
 
-def _opencv_extract(img_rgb, img_bgr, words) -> list:
+def _opencv_extract(img_rgb, img_bgr, words, gemini_labels=None) -> list:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
     circles = cv2.HoughCircles(
@@ -232,8 +263,13 @@ def _opencv_extract(img_rgb, img_bgr, words) -> list:
         logger.warning("No circles found")
         return []
 
-    label_tokens = [w for w in words if _is_swatch_code(w['text'])]
-    logger.info(f"Swatch label candidates: {[w['text'] for w in label_tokens]}")
+    # Use Gemini-identified labels if available, otherwise fall back to regex
+    if gemini_labels is not None:
+        label_tokens = [w for w in words if w['text'] in gemini_labels]
+        logger.info(f"Swatch label candidates (Gemini): {[w['text'] for w in label_tokens]}")
+    else:
+        label_tokens = [w for w in words if _is_swatch_code(w['text'])]
+        logger.info(f"Swatch label candidates (regex): {[w['text'] for w in label_tokens]}")
 
     def find_label(cx, cy, used):
         cx_pts, cy_pts = cx / SCALE, cy / SCALE
@@ -293,41 +329,70 @@ def _opencv_extract(img_rgb, img_bgr, words) -> list:
     return results
 
 
-# ── Gemini fallback ───────────────────────────────────────────────────────────
+# ── Gemini label assist ───────────────────────────────────────────────────────
+#
+# Instead of asking Gemini for pixel bounding boxes (spatial reasoning = weak),
+# we ask it to READ THE TEXT CODES off the page (text reading = strong).
+# OpenCV still does all the spatial/circle detection work.
+#
+# With Gemini key:   label_tokens = Gemini-identified codes
+# Without Gemini key: label_tokens = _is_swatch_code() regex (current behaviour)
+#
+# This replaces the old "fallback" concept entirely.
 
-def _gemini_extract(img_rgb: np.ndarray, gemini_key: str) -> list:
+def _gemini_read_labels(img_rgb: np.ndarray, gemini_key: str) -> list[str] | None:
+    """
+    Ask Gemini to identify swatch code labels visible on the page.
+    Returns a list of code strings, or None if the call fails.
+
+    This is a TEXT READING task, not a spatial/coordinate task.
+    Much more reliable than asking Gemini for bounding boxes.
+    Gemini 2.0 Flash is sufficient — Pro not needed for this.
+    """
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=gemini_key)
-        model = genai.GenerativeModel("gemini-2.0-flash")
+        from google import genai as ggenai
+        client = ggenai.Client(api_key=gemini_key)
+
         buf = io.BytesIO()
         Image.fromarray(img_rgb).save(buf, format="PNG")
-        response = model.generate_content([
-            Image.open(io.BytesIO(buf.getvalue())),
-            "Find all color/material swatch circles on this furniture catalog page. "
-            "Return ONLY JSON array, no markdown:\n"
-            '[{"label":"P15","category":"frame","x1":100,"y1":200,"x2":155,"y2":255}]\n'
-            "category: frame | fabric | faux_leather | wood | lacquer | ceramic | glass | glass_stone | other"
-        ])
-        raw        = re.sub(r"```(?:json)?|```", "", response.text).strip()
-        detections = json.loads(raw)
-        results = []
-        for d in detections:
-            x1 = max(0, d['x1'] - PADDING);  y1 = max(0, d['y1'] - PADDING)
-            x2 = min(img_rgb.shape[1], d['x2'] + PADDING)
-            y2 = min(img_rgb.shape[0], d['y2'] + PADDING)
-            if (x2-x1) < 10 or (y2-y1) < 10: continue
-            b = io.BytesIO()
-            Image.fromarray(img_rgb[y1:y2, x1:x2]).save(b, format="PNG")
-            results.append(SwatchResult(
-                label=d.get('label','unknown'), category=d.get('category','other'),
-                image_bytes=b.getvalue(), confidence="gemini",
-            ))
-        logger.info(f"Gemini returned {len(results)} swatches")
-        return results
+        image_bytes = buf.getvalue()
+
+        prompt = (
+            "This is a furniture catalog spec page. "
+            "Find ALL finish/material/color codes shown as labels near swatch samples.\n"
+            "These are short product codes like: P15, P38M, SKZ, SLA, GTG, Cod.50, Cod.03, "
+            "T3H, P2C, GMA, MTO etc.\n"
+            "Return ONLY a JSON array of the exact codes you can read. No explanation, no markdown.\n"
+            "Example: [\"P15\", \"P151\", \"P38M\", \"SKZ\", \"Cod.50\"]"
+        )
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[
+                ggenai.types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
+                prompt,
+            ],
+        )
+
+        raw    = re.sub(r"```(?:json)?|```", "", response.text).strip()
+        labels = json.loads(raw)
+
+        if isinstance(labels, list) and all(isinstance(lb, str) for lb in labels):
+            # Deduplicate preserving order
+            seen, unique = set(), []
+            for lb in labels:
+                if lb not in seen:
+                    seen.add(lb)
+                    unique.append(lb)
+            logger.info(f"Gemini identified {len(unique)} labels: {unique}")
+            return unique
+
+        logger.warning("Gemini returned unexpected format — falling back to regex")
+        return None
+
     except Exception as e:
-        logger.error(f"Gemini fallback failed: {e}")
-        return []
+        logger.warning(f"Gemini label read failed ({e}) — using regex labels")
+        return None
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -344,7 +409,7 @@ def extract_swatches(
     Args:
         pdf_bytes:    Raw PDF bytes
         page_num:     Explicit 0-indexed page, or None for auto-detect
-        expected_min: Trigger Gemini fallback if OpenCV finds fewer
+        expected_min: (unused — kept for API compatibility)
         gemini_key:   Free from aistudio.google.com
     """
     if page_num is None:
@@ -359,10 +424,12 @@ def extract_swatches(
         words = pdf.pages[page_num].extract_words()
     logger.info(f"Text tokens: {len(words)}")
 
-    results = _opencv_extract(img_rgb, img_bgr, words)
+    # If Gemini key provided: ask Gemini to READ the label codes (text reading task).
+    # OpenCV still handles all circle detection and pixel coordinates.
+    # This is far more reliable than asking Gemini for bounding boxes.
+    gemini_labels = None
+    if gemini_key:
+        gemini_labels = _gemini_read_labels(img_rgb, gemini_key)
 
-    if len(results) < expected_min and gemini_key:
-        logger.info(f"OpenCV got {len(results)} < {expected_min} — Gemini fallback")
-        results = _gemini_extract(img_rgb, gemini_key)
-
+    results = _opencv_extract(img_rgb, img_bgr, words, gemini_labels=gemini_labels)
     return results
