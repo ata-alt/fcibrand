@@ -104,9 +104,9 @@ def process(req: ProcessRequest):
 # ── Swatch extraction — returns ZIP of PNGs ───────────────
 @app.post("/extract")
 async def extract_to_zip(
-    file:         UploadFile = File(..., description="Furniture catalog PDF"),
-    page:         int        = Form(0,  description="0-indexed page number"),
-    expected_min: int        = Form(3,  description="Min swatches before Gemini fallback"),
+    file:         UploadFile    = File(..., description="Furniture catalog PDF"),
+    page:         Optional[int] = Form(None, description="Page number (None = auto-detect)"),
+    expected_min: int           = Form(3,    description="Min swatches before Gemini fallback"),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File must be a PDF")
@@ -166,9 +166,9 @@ async def extract_to_zip(
 # ── Swatch extraction — returns JSON with base64 images ───
 @app.post("/extract/json")
 async def extract_to_json(
-    file:         UploadFile = File(...),
-    page:         int        = Form(0),
-    expected_min: int        = Form(3),
+    file:         UploadFile    = File(...),
+    page:         Optional[int] = Form(None),
+    expected_min: int           = Form(3),
 ):
     if not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="File must be a PDF")
