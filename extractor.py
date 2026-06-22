@@ -234,6 +234,19 @@ def _opencv_extract(img_rgb, img_bgr, words) -> list:
     matched_ys  = []
 
     for (cx, cy, r) in sorted(np.round(circles[0]).astype(int), key=lambda x: x[0]):
+        # ── Reject text/noise circles ──────────────────────────
+        # Real swatches: low white% OR uniform color (low std)
+        # Text circles: high white% AND high contrast (dark lines on white paper)
+        x1c = max(0,                int(cx) - r - 4)
+        y1c = max(0,                int(cy) - r - 4)
+        x2c = min(img_rgb.shape[1], int(cx) + r + 4)
+        y2c = min(img_rgb.shape[0], int(cy) + r + 4)
+        crop_g    = np.array(Image.fromarray(img_rgb[y1c:y2c, x1c:x2c]).convert('L'))
+        white_pct = float((crop_g > 220).sum()) / max(crop_g.size, 1)
+        std_val   = float(crop_g.std())
+        if white_pct > 0.65 and std_val > 42:
+            continue   # text on white paper, not a color swatch
+
         token = find_label(int(cx), int(cy), used_ids)
         if not token:
             continue
