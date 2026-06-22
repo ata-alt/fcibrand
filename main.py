@@ -7,7 +7,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 from processor import process_image
-from extractor import extract_swatches
+from extractor import extract_swatches, NoSwatchPageError
 from logger_config import setup_logger
 
 logger = setup_logger("main")
@@ -122,6 +122,8 @@ async def extract_to_zip(
             expected_min = expected_min,
             gemini_key   = os.getenv("GEMINI_API_KEY"),
         )
+    except NoSwatchPageError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -129,7 +131,7 @@ async def extract_to_zip(
         raise HTTPException(status_code=500, detail=str(e))
 
     if not swatches:
-        raise HTTPException(status_code=404, detail="No swatches detected on this page")
+        raise HTTPException(status_code=404, detail="No swatches detected on the identified page. Try specifying a page number manually.")
 
     zip_buf = io.BytesIO()
     with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -182,6 +184,8 @@ async def extract_to_json(
             expected_min = expected_min,
             gemini_key   = os.getenv("GEMINI_API_KEY"),
         )
+    except NoSwatchPageError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
