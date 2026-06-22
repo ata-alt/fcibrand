@@ -1,10 +1,13 @@
 import os
-from fastapi import FastAPI, HTTPException
+import io
+import zipfile
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 from processor import process_image
+from extractor import extract_swatches
 from logger_config import setup_logger
 
 logger = setup_logger("main")
@@ -97,6 +100,113 @@ def process(req: ProcessRequest):
     except Exception as e:
         logger.error(f"Request failed — {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+# ── Swatch extraction — returns ZIP of PNGs ───────────────
+@app.post("/extract")
+async def extract_to_zip(
+    file:         UploadFile = File(..., description="Furniture catalog PDF"),
+    page:         int        = Form(0,  description="0-indexed page number"),
+    expected_min: int        = Form(3,  description="Min swatches before Gemini fallback"),
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    pdf_bytes = await file.read()
+    if len(pdf_bytes) > 50 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="PDF too large (max 50MB)")
+
+    try:
+        swatches = extract_swatches(
+            pdf_bytes    = pdf_bytes,
+            page_num     = page,
+            expected_min = expected_min,
+            gemini_key   = os.getenv("GEMINI_API_KEY"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Swatch extraction failed — {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    if not swatches:
+        raise HTTPException(status_code=404, detail="No swatches detected on this page")
+
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for sw in swatches:
+            zf.writestr(f"{sw.category}__{sw.label}.png", sw.image_bytes)
+        manifest = {
+            "source":  file.filename,
+            "page":    page,
+            "total":   len(swatches),
+            "swatches": [
+                {
+                    "label":      sw.label,
+                    "category":   sw.category,
+                    "file":       f"{sw.category}__{sw.label}.png",
+                    "size":       f"{sw.width}x{sw.height}",
+                    "confidence": sw.confidence,
+                }
+                for sw in swatches
+            ],
+        }
+        import json
+        zf.writestr("_manifest.json", json.dumps(manifest, indent=2))
+
+    zip_buf.seek(0)
+    zip_name = file.filename.replace(".pdf", "_swatches.zip")
+    logger.info(f"Swatch ZIP — {len(swatches)} swatches from '{file.filename}' page {page}")
+
+    return StreamingResponse(
+        zip_buf,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+    )
+
+# ── Swatch extraction — returns JSON with base64 images ───
+@app.post("/extract/json")
+async def extract_to_json(
+    file:         UploadFile = File(...),
+    page:         int        = Form(0),
+    expected_min: int        = Form(3),
+):
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File must be a PDF")
+
+    pdf_bytes = await file.read()
+
+    try:
+        swatches = extract_swatches(
+            pdf_bytes    = pdf_bytes,
+            page_num     = page,
+            expected_min = expected_min,
+            gemini_key   = os.getenv("GEMINI_API_KEY"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Swatch extraction failed — {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+    logger.info(f"Swatch JSON — {len(swatches)} swatches from '{file.filename}' page {page}")
+
+    return JSONResponse({
+        "source":  file.filename,
+        "page":    page,
+        "total":   len(swatches),
+        "swatches": [
+            {
+                "label":          sw.label,
+                "category":       sw.category,
+                "width":          sw.width,
+                "height":         sw.height,
+                "confidence":     sw.confidence,
+                "image_b64":      sw.image_b64,
+                "image_data_uri": f"data:image/png;base64,{sw.image_b64}",
+            }
+            for sw in swatches
+        ],
+    })
 
 # ── Log viewer ─────────────────────────────────────────────
 @app.get("/logs", response_class=PlainTextResponse)
