@@ -1,71 +1,75 @@
 """
-Swatch Extractor — Core Logic
-==============================
+Swatch Extractor
+=================
+Fully language-agnostic — works for Italian, German, English, French catalogs.
+No hardcoded section heading keywords anywhere.
+
 Pipeline:
-  1. PyMuPDF  → render PDF page to image
-  2. pdfplumber → extract text positions (section anchors + swatch labels)
-  3. OpenCV HoughCircles → detect swatch circles in ROI
-  4. Label matching → assign codes to circles
-  5. If matched < expected threshold → Gemini Flash fallback
-  6. PIL → crop + return individual swatch images
+  1. Auto-detect swatch page (scores every page — no page=0 assumption)
+  2. OpenCV HoughCircles with is_swatch_code label filter
+  3. Gemini 2.0 Flash fallback if OpenCV undershoots threshold
 """
 
-import io
-import os
-import re
-import json
-import base64
-import logging
+import io, re, json, base64, logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-import cv2
-import fitz  # PyMuPDF
-import numpy as np
-import pdfplumber
+import cv2, fitz, numpy as np, pdfplumber
 from PIL import Image
 
-logger = logging.getLogger(__name__)
+try:
+    from logger_config import setup_logger
+    logger = setup_logger("extractor")
+except ImportError:
+    logging.basicConfig(level=logging.INFO)
+    logger = logging.getLogger("extractor")
 
-# ── Config ────────────────────────────────────────────────────────────────────
-
-DPI = 250
-SCALE = DPI / 72.0
+DPI     = 250
+SCALE   = DPI / 72.0
 PADDING = 8
 
-# Words that appear on catalog pages but are NOT swatch labels
-STOP_WORDS = {
-    'Frame','Struttura','Seat','Sedile','Dimensions','Dimensioni',
-    'metal','metallo','fabric','tessuto','faux','leather','similpelle',
-    'Made','to','Order','Finishes','Finish','Options','Color','Colour',
-    'Colors','Colours','Structure','Upholstery','Base','Top','Wood',
-    'Lacquer','Stone','Glass','180','181','182','183','184',
+# ── Swatch code recogniser ────────────────────────────────────────────────────
+# Language-agnostic: identifies product codes by shape, not by catalogue keywords.
+
+_STOP = {
+    'Made','Order','Being','Note','View','More',
+    'Frame','Struttura','Gestell','Structure',
+    'Seat','Sedile','Sitz','Assise',
+    'Dimensions','Dimensioni','Abmessungen',
+    'Metal','Metallo','Fabric','Tessuto','Stoff','Tissu',
+    'Leather','Similpelle','Kunstleder','Cuir',
+    'Wood','Legno','Holz','Bois',
+    'Base','Top','Sedia','Poltr','Tavol','Stuhl','Tisch',
+    'Sofa','Bett','Chaise','Table',
 }
 
-# Section heading keywords to find ROI boundaries
-SECTION_START_KEYWORDS = ['Frame','Struttura','Structure','Finish','Finishes','Base']
-SECTION_END_KEYWORDS   = ['Dimensions','Dimensioni','Size','Sizes','Technical']
+def _is_swatch_code(text: str) -> bool:
+    """True if text looks like a swatch/finish code rather than prose."""
+    t = text.strip().rstrip('.')
+    if len(t) < 2 or len(t) > 8:           return False
+    if t in _STOP:                          return False
+    if ',' in t or '.' in t:               return False   # dimension values: H78,5
+    if re.match(r'^CB\d+', t):             return False   # SKU codes: CB2348
+    if re.match(r'^[HS][HX]?\d+', t):     return False   # H97, SH65
+    if re.match(r'^\d+$', t):             return False   # page numbers: 180
+    if re.search(r'\d', t):               return True    # P15, T3H, P38M, P151
+    if t.isupper() and 2 <= len(t) <= 5:  return True    # SKZ, SLA, SLB
+    if t[0].isupper() and t[1:].islower() and 3 <= len(t) <= 6:
+        return True                                       # Cros, Harry, Vero
+    return False
 
-# Known y-band definitions (in PDF pts, relative to section start top)
-# These are relative offsets — computed dynamically per page
-# fallback if no section header found: scan full page
-SWATCH_BANDS = {
-    'frame':        (0,   80),   # within ~80pts of Frame header
-    'fabric':       (100, 175),  # fabric section comes after
-    'faux_leather': (175, 250),  # faux leather after fabric
-}
 
-# ── Data types ────────────────────────────────────────────────────────────────
+# ── Data type ─────────────────────────────────────────────────────────────────
 
 @dataclass
 class SwatchResult:
-    label: str
-    category: str
-    image_bytes: bytes          # PNG bytes of cropped swatch
-    image_b64: str = field(default="")
-    width: int = 0
-    height: int = 0
-    confidence: str = "opencv"  # "opencv" | "gemini"
+    label:       str
+    category:    str
+    image_bytes: bytes
+    image_b64:   str = field(default="")
+    width:       int = 0
+    height:      int = 0
+    confidence:  str = "opencv"
 
     def __post_init__(self):
         self.image_b64 = base64.b64encode(self.image_bytes).decode()
@@ -73,250 +77,239 @@ class SwatchResult:
         self.width, self.height = img.size
 
 
-# ── Step 1: Render ────────────────────────────────────────────────────────────
+# ── Page auto-detection ───────────────────────────────────────────────────────
 
-def render_page(pdf_bytes: bytes, page_num: int = 0) -> tuple[np.ndarray, np.ndarray]:
-    """Returns (img_rgb_np, img_bgr_np) at DPI resolution."""
+def _score_page(pdf_bytes: bytes, page_num: int) -> float:
+    """
+    Score page for swatch likelihood.
+    Signal: consistent-radius circles + short product codes.
+    No language keywords used.
+    """
+    doc  = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pix  = doc[page_num].get_pixmap(matrix=fitz.Matrix(150/72, 150/72))
+    img  = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    gray = cv2.cvtColor(cv2.cvtColor(img, cv2.COLOR_RGB2BGR), cv2.COLOR_BGR2GRAY)
+
+    circles = cv2.HoughCircles(
+        cv2.GaussianBlur(gray, (5, 5), 0), cv2.HOUGH_GRADIENT,
+        dp=1.2, minDist=20, param1=55, param2=20, minRadius=10, maxRadius=35
+    )
+
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        words = pdf.pages[page_num].extract_words()
+
+    total_words   = len(words)
+    swatch_tokens = sum(1 for w in words if _is_swatch_code(w['text']))
+
+    # Hard-disqualify full-bleed photo pages
+    if total_words < 8:
+        return -999.0
+
+    score = float(swatch_tokens * 20)  # strongest signal
+
+    if circles is not None:
+        radii     = circles[0][:, 2]
+        r_std     = float(np.std(radii))
+        n         = len(circles[0])
+        # Low radius variance = swatch grid; high variance = photo
+        if r_std < 3:   score += n * 5
+        elif r_std < 6: score += n * 2
+        else:           score -= n * 1.0
+
+    if total_words > 300:
+        score -= 30
+
+    return score
+
+
+def find_swatch_page(pdf_bytes: bytes) -> int:
+    """Return page number most likely to contain swatches."""
+    n = len(fitz.open(stream=pdf_bytes, filetype="pdf"))
+    logger.info(f"Scanning {n} pages for swatch page...")
+    scores = []
+    for i in range(n):
+        s = _score_page(pdf_bytes, i)
+        scores.append((s, i))
+        logger.info(f"  Page {i}: score={s:.0f}")
+    best_score, best_page = max(scores)
+    logger.info(f"Swatch page: {best_page} (score={best_score:.0f})")
+    return best_page
+
+
+# ── Render ────────────────────────────────────────────────────────────────────
+
+def _render(pdf_bytes: bytes, page_num: int):
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     if page_num >= len(doc):
         raise ValueError(f"Page {page_num} out of range (PDF has {len(doc)} pages)")
-    page = doc[page_num]
-    pix = page.get_pixmap(matrix=fitz.Matrix(SCALE, SCALE))
-    img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
-    img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
-    return img_np, img_bgr
+    pix = doc[page_num].get_pixmap(matrix=fitz.Matrix(SCALE, SCALE))
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    return img, cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
-# ── Step 2: Text extraction ────────────────────────────────────────────────────
+# ── Category from heading above circle ───────────────────────────────────────
 
-def extract_text_layout(pdf_bytes: bytes, page_num: int = 0):
-    """Returns (section_start_top, section_end_top, label_tokens)."""
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
-        page = pdf.pages[page_num]
-        words = page.extract_words()
+_CAT_KW = {
+    'frame':        ['frame','struttura','gestell','structure','base','metal',
+                     'metallo','stahl','acier','acero'],
+    'fabric':       ['fabric','tessuto','stoff','tissu','tejido','upholstery'],
+    'faux_leather': ['faux','leather','similpelle','kunstleder','simili','cuir',
+                     'ecopelle','cuero'],
+    'wood':         ['wood','legno','holz','bois','madera','oak','walnut','noce'],
+    'lacquer':      ['lacquer','lacca','lack','laque','laca','laccato'],
+}
 
-    section_start = None
-    section_end = None
-
-    for w in words:
-        if section_start is None and w['text'] in SECTION_START_KEYWORDS:
-            section_start = w['top']
-        if section_end is None and w['text'] in SECTION_END_KEYWORDS:
-            if section_start and w['top'] > section_start:
-                section_end = w['top']
-
-    # Fallback: use 30% → 85% of page height
-    if section_start is None:
-        page_height = pdf.pages[page_num].height if hasattr(pdf, 'pages') else 800
-        section_start = page_height * 0.30
-    if section_end is None:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf2:
-            section_end = pdf2.pages[page_num].height * 0.85
-
-    label_tokens = [
-        w for w in words
-        if w['top'] > section_start
-        and w['top'] < section_end
-        and w['text'] not in STOP_WORDS
-        and len(w['text']) >= 2
-        and not w['text'].isdigit()
-    ]
-
-    return section_start, section_end, label_tokens
+def _category(cy_px: float, words: list, roi_y1: int, roi_y2: int) -> str:
+    cy_pts = cy_px / SCALE
+    above  = [w for w in words if w['top'] < cy_pts and cy_pts - w['top'] < 130]
+    for w in sorted(above, key=lambda x: cy_pts - x['top']):
+        tok = w['text'].lower()
+        for cat, kws in _CAT_KW.items():
+            if any(kw in tok for kw in kws):
+                return cat
+    # Positional fallback: thirds of ROI
+    span = max(roi_y2 - roi_y1, 1)
+    rel  = (cy_px - roi_y1) / span
+    if rel < 0.33:   return 'frame'
+    elif rel < 0.66: return 'fabric'
+    return 'faux_leather'
 
 
-# ── Step 3 + 4: OpenCV detection + label matching ─────────────────────────────
+# ── Main extraction ───────────────────────────────────────────────────────────
 
-def detect_and_match(
-    img_bgr: np.ndarray,
-    img_rgb: np.ndarray,
-    section_start: float,
-    section_end: float,
-    label_tokens: list,
-) -> list[SwatchResult]:
-
-    ROI_y1 = max(0, int((section_start - 30) * SCALE))
-    ROI_y2 = min(img_bgr.shape[0], int((section_end + 10) * SCALE))
-    roi = img_bgr[ROI_y1:ROI_y2]
-
-    gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
-    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+def _opencv_extract(img_rgb, img_bgr, words) -> list[SwatchResult]:
+    gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
     circles = cv2.HoughCircles(
-        gray,
-        cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=55,
-        param1=55,
-        param2=22,
-        minRadius=25,
-        maxRadius=50,
+        cv2.GaussianBlur(gray, (5, 5), 0), cv2.HOUGH_GRADIENT,
+        dp=1.2, minDist=55, param1=55, param2=22, minRadius=25, maxRadius=50
     )
-
     if circles is None:
-        logger.warning("HoughCircles found no circles in ROI")
+        logger.warning("No circles found")
         return []
 
-    c = np.round(circles[0]).astype(int)
+    label_tokens = [w for w in words if _is_swatch_code(w['text'])]
+    logger.info(f"Swatch label candidates: {[w['text'] for w in label_tokens]}")
 
-    # Build dynamic y-bands relative to section_start
-    band_width = (section_end - section_start) / 3
-    bands = {
-        'frame':        (section_start,              section_start + band_width),
-        'fabric':       (section_start + band_width, section_start + band_width * 2),
-        'faux_leather': (section_start + band_width * 2, section_end),
-    }
-
-    # Filter circles into bands
-    valid = []
-    for (cx, cy_roi, r) in c:
-        cy_page = cy_roi + ROI_y1
-        cy_pts = cy_page / SCALE
-        for cat, (lo, hi) in bands.items():
-            if lo < cy_pts < hi:
-                valid.append((cx, cy_page, r, cat))
-                break
-
-    # Match to labels
-    def find_label(cx_px, cy_px, used_ids):
-        cx_pts, cy_pts = cx_px / SCALE, cy_px / SCALE
-        best, best_d = None, float('inf')
+    # Derive ROI from circles that actually have labels
+    # (avoids committing to a y-range before we know which circles are real)
+    def find_label(cx, cy, used):
+        cx_pts, cy_pts = cx / SCALE, cy / SCALE
+        best, bd = None, float('inf')
         for w in label_tokens:
-            if id(w) in used_ids:
-                continue
+            if id(w) in used: continue
             lx = (w['x0'] + w['x1']) / 2
             ly = w['top']
-            if cy_pts < ly < cy_pts + 50:
+            if cy_pts < ly < cy_pts + 55:
                 d = abs(lx - cx_pts)
-                if d < best_d and d < 55:
-                    best_d, best = d, w
+                if d < bd and d < 55:
+                    bd, best = d, w
         return best
 
-    results = []
+    results  = []
     used_ids = set()
+    matched_ys = []
 
-    for (cx, cy_page, r, cat) in sorted(valid, key=lambda x: x[0]):
-        token = find_label(cx, cy_page, used_ids)
+    for (cx, cy, r) in sorted(np.round(circles[0]).astype(int), key=lambda x: x[0]):
+        token = find_label(int(cx), int(cy), used_ids)
         if not token:
-            continue  # discard unmatched — likely noise/icons
+            continue
         used_ids.add(id(token))
+        matched_ys.append(int(cy))
 
-        x1 = max(0, cx - r - PADDING)
-        y1 = max(0, cy_page - r - PADDING)
-        x2 = min(img_rgb.shape[1], cx + r + PADDING)
-        y2 = min(img_rgb.shape[0], cy_page + r + PADDING)
+        roi_y1 = min(matched_ys) - 100 if matched_ys else 0
+        roi_y2 = max(matched_ys) + 100 if matched_ys else img_bgr.shape[0]
+        cat = _category(int(cy), words, roi_y1, roi_y2)
 
-        crop_np = img_rgb[y1:y2, x1:x2]
+        x1 = max(0,               int(cx) - r - PADDING)
+        y1 = max(0,               int(cy) - r - PADDING)
+        x2 = min(img_rgb.shape[1], int(cx) + r + PADDING)
+        y2 = min(img_rgb.shape[0], int(cy) + r + PADDING)
+
         buf = io.BytesIO()
-        Image.fromarray(crop_np).save(buf, format="PNG")
+        Image.fromarray(img_rgb[y1:y2, x1:x2]).save(buf, format="PNG")
 
         results.append(SwatchResult(
-            label=token['text'],
-            category=cat,
-            image_bytes=buf.getvalue(),
-            confidence="opencv",
+            label=token['text'], category=cat,
+            image_bytes=buf.getvalue(), confidence="opencv",
         ))
 
     logger.info(f"OpenCV matched {len(results)} swatches")
     return results
 
 
-# ── Step 5: Gemini fallback ────────────────────────────────────────────────────
+# ── Gemini fallback ───────────────────────────────────────────────────────────
 
-def gemini_fallback(png_bytes: bytes, gemini_key: str) -> list[dict]:
-    """
-    Use Gemini 2.0 Flash to detect swatch bboxes when OpenCV undershoots.
-    Returns list of {label, category, x1, y1, x2, y2}.
-    Free tier: 1500 req/day, 15 req/min.
-    """
+def _gemini_extract(img_rgb: np.ndarray, gemini_key: str) -> list[SwatchResult]:
     try:
         import google.generativeai as genai
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel("gemini-2.0-flash")
 
-        img = Image.open(io.BytesIO(png_bytes))
+        buf = io.BytesIO()
+        Image.fromarray(img_rgb).save(buf, format="PNG")
         response = model.generate_content([
-            img,
-            """This is a furniture catalog spec page. Find all color/material swatch circles.
-Return ONLY a JSON array, no markdown:
-[{"label":"P15","category":"frame","x1":100,"y1":200,"x2":155,"y2":255}]
-category must be one of: frame, fabric, faux_leather, wood, lacquer, other."""
+            Image.open(io.BytesIO(buf.getvalue())),
+            "Find all color/material swatch circles on this furniture catalog page. "
+            "Return ONLY JSON array, no markdown:\n"
+            '[{"label":"P15","category":"frame","x1":100,"y1":200,"x2":155,"y2":255}]\n'
+            "category: frame | fabric | faux_leather | wood | lacquer | other"
         ])
+        raw        = re.sub(r"```(?:json)?|```", "", response.text).strip()
+        detections = json.loads(raw)
 
-        raw = re.sub(r"```(?:json)?|```", "", response.text).strip()
-        return json.loads(raw)
-
+        results = []
+        for d in detections:
+            x1 = max(0, d['x1'] - PADDING);  y1 = max(0, d['y1'] - PADDING)
+            x2 = min(img_rgb.shape[1], d['x2'] + PADDING)
+            y2 = min(img_rgb.shape[0], d['y2'] + PADDING)
+            if (x2-x1) < 10 or (y2-y1) < 10: continue
+            b = io.BytesIO()
+            Image.fromarray(img_rgb[y1:y2, x1:x2]).save(b, format="PNG")
+            results.append(SwatchResult(
+                label=d.get('label','unknown'), category=d.get('category','other'),
+                image_bytes=b.getvalue(), confidence="gemini",
+            ))
+        logger.info(f"Gemini returned {len(results)} swatches")
+        return results
     except Exception as e:
         logger.error(f"Gemini fallback failed: {e}")
         return []
 
 
-def run_gemini_fallback(
-    pdf_bytes: bytes,
-    img_rgb: np.ndarray,
-    page_num: int,
-    gemini_key: str,
-) -> list[SwatchResult]:
-    """Render page, call Gemini, crop results."""
-    pix_buf = io.BytesIO()
-    Image.fromarray(img_rgb).save(pix_buf, format="PNG")
-    png_bytes = pix_buf.getvalue()
-
-    detections = gemini_fallback(png_bytes, gemini_key)
-    results = []
-
-    for d in detections:
-        x1, y1, x2, y2 = d['x1'], d['y1'], d['x2'], d['y2']
-        # Add padding
-        x1 = max(0, x1 - PADDING)
-        y1 = max(0, y1 - PADDING)
-        x2 = min(img_rgb.shape[1], x2 + PADDING)
-        y2 = min(img_rgb.shape[0], y2 + PADDING)
-
-        if (x2 - x1) < 10 or (y2 - y1) < 10:
-            continue
-
-        crop_np = img_rgb[y1:y2, x1:x2]
-        buf = io.BytesIO()
-        Image.fromarray(crop_np).save(buf, format="PNG")
-
-        results.append(SwatchResult(
-            label=d.get('label', 'unknown'),
-            category=d.get('category', 'other'),
-            image_bytes=buf.getvalue(),
-            confidence="gemini",
-        ))
-
-    logger.info(f"Gemini returned {len(results)} swatches")
-    return results
-
-
-# ── Main entry point ──────────────────────────────────────────────────────────
+# ── Public API ────────────────────────────────────────────────────────────────
 
 def extract_swatches(
-    pdf_bytes: bytes,
-    page_num: int = 0,
-    expected_min: int = 3,
-    gemini_key: Optional[str] = None,
+    pdf_bytes:    bytes,
+    page_num:     Optional[int] = None,
+    expected_min: int  = 3,
+    gemini_key:   Optional[str] = None,
 ) -> list[SwatchResult]:
     """
-    Full pipeline. Returns list of SwatchResult objects.
+    Extract swatch images from any furniture catalog PDF.
 
     Args:
-        pdf_bytes:    Raw PDF file bytes
-        page_num:     Which page to process (0-indexed)
-        expected_min: If OpenCV finds fewer than this, trigger Gemini fallback
-        gemini_key:   GEMINI_API_KEY (free at aistudio.google.com); None = no fallback
+        pdf_bytes:    Raw PDF bytes
+        page_num:     Explicit page (0-indexed). None = auto-detect.
+        expected_min: Trigger Gemini fallback if OpenCV finds fewer.
+        gemini_key:   Free from aistudio.google.com
     """
-    logger.info(f"Extracting swatches from page {page_num}")
+    if page_num is None:
+        page_num = find_swatch_page(pdf_bytes)
+    else:
+        logger.info(f"Using explicit page: {page_num}")
 
-    img_rgb, img_bgr = render_page(pdf_bytes, page_num)
-    section_start, section_end, label_tokens = extract_text_layout(pdf_bytes, page_num)
-    results = detect_and_match(img_bgr, img_rgb, section_start, section_end, label_tokens)
+    img_rgb, img_bgr = _render(pdf_bytes, page_num)
+    logger.info(f"Page {page_num} rendered: {img_bgr.shape[1]}x{img_bgr.shape[0]}px")
 
-    # Trigger Gemini fallback if under threshold
+    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        words = pdf.pages[page_num].extract_words()
+    logger.info(f"Text tokens: {len(words)}")
+
+    results = _opencv_extract(img_rgb, img_bgr, words)
+
     if len(results) < expected_min and gemini_key:
-        logger.info(f"OpenCV got {len(results)} < {expected_min}, triggering Gemini fallback")
-        results = run_gemini_fallback(pdf_bytes, img_rgb, page_num, gemini_key)
+        logger.info(f"OpenCV got {len(results)} < {expected_min} — Gemini fallback")
+        results = _gemini_extract(img_rgb, gemini_key)
 
     return results
