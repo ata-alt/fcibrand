@@ -270,7 +270,9 @@ def _render(pdf_bytes: bytes, page_num: int):
 
 _CAT_KW = {
     'frame':        ['frame','struttura','gestell','structure','base','basamento',
-                     'metal','metallo','stahl','acier','acero'],
+                     'metal','metallo','stahl','acier','acero',
+                     'piede','piedi','gambe','legs'],  # metal legs section
+    'stitching':    ['cuciture','cucitura','stitching','couture','naht','stitch'],
     'fabric':       ['fabric','tessuto','stoff','tissu','tejido','upholstery'],
     'faux_leather': ['faux','leather','similpelle','kunstleder','simili','cuir',
                      'ecopelle','cuero'],
@@ -303,7 +305,7 @@ def _opencv_extract(img_rgb, img_bgr, words, gemini_labels=None) -> list:
 
     circles = cv2.HoughCircles(
         cv2.GaussianBlur(gray, (5, 5), 0), cv2.HOUGH_GRADIENT,
-        dp=1.2, minDist=55, param1=55, param2=22, minRadius=25, maxRadius=50
+        dp=1.2, minDist=55, param1=55, param2=22, minRadius=25, maxRadius=60
     )
     if circles is None:
         logger.warning("No circles found")
@@ -328,6 +330,10 @@ def _opencv_extract(img_rgb, img_bgr, words, gemini_labels=None) -> list:
     else:
         label_tokens = [w for w in words if _is_swatch_code(w['text'])]
         logger.info(f"Swatch label candidates (regex): {[w['text'] for w in label_tokens]}")
+
+    # Reverse map: pdfplumber token id → clean Gemini label
+    # Fixes "Cod.50//" being stored instead of "Cod.50"
+    id_to_gemini = {id(w): gl for gl, w in gemini_label_map.items()} if gemini_label_map else {}
 
     def find_label(cx, cy, used):
         cx_pts, cy_pts = cx / SCALE, cy / SCALE
@@ -378,8 +384,9 @@ def _opencv_extract(img_rgb, img_bgr, words, gemini_labels=None) -> list:
         buf = io.BytesIO()
         Image.fromarray(img_rgb[y1:y2, x1:x2]).save(buf, format="PNG")
 
+        clean_label = id_to_gemini.get(id(token), token['text'])
         results.append(SwatchResult(
-            label=token['text'], category=cat,
+            label=clean_label, category=cat,
             image_bytes=buf.getvalue(), confidence="opencv",
         ))
 
