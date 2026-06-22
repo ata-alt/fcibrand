@@ -12,7 +12,3 @@ pymupdf==1.24.11
 pdfplumber==0.11.4
 opencv-python-headless==4.10.0.84
 google-generativeai==0.8.3
-pymupdf==1.24.11
-pdfplumber==0.11.4
-opencv-python-headless==4.10.0.84
-google-generativeai==0.8.3
