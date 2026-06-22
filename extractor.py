@@ -145,8 +145,21 @@ def _score_page(pdf_bytes: bytes, page_num: int) -> float:
     return score
 
 
+# Minimum score for a page to be considered a swatch page.
+# Pages below this are product photography or pure text — skip extraction entirely.
+MIN_SWATCH_SCORE = 50
+
+
+class NoSwatchPageError(ValueError):
+    """Raised when no page in the PDF looks like a swatch/spec page."""
+    pass
+
+
 def find_swatch_page(pdf_bytes: bytes) -> int:
-    """Scan all pages and return the one most likely to contain swatches."""
+    """
+    Scan all pages and return the one most likely to contain swatches.
+    Raises NoSwatchPageError if no page scores above MIN_SWATCH_SCORE.
+    """
     n = len(fitz.open(stream=pdf_bytes, filetype="pdf"))
     logger.info(f"Scanning {n} pages for swatch page...")
     scores = []
@@ -156,6 +169,12 @@ def find_swatch_page(pdf_bytes: bytes) -> int:
         logger.info(f"  Page {i}: score={s:.0f}")
     best_score, best_page = max(scores)
     logger.info(f"Swatch page: {best_page} (score={best_score:.0f})")
+    if best_score < MIN_SWATCH_SCORE:
+        raise NoSwatchPageError(
+            f"No swatch spec page found in this PDF "
+            f"(best page {best_page} scored {best_score:.0f}, minimum is {MIN_SWATCH_SCORE}). "
+            f"This PDF appears to contain only product photography or text pages."
+        )
     return best_page
 
 
