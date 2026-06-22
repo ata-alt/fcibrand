@@ -186,27 +186,55 @@ class NoSwatchPageError(ValueError):
     pass
 
 
-def find_swatch_page(pdf_bytes: bytes) -> int:
+def find_swatch_page(pdf_bytes: bytes, gemini_key: str | None = None) -> int:
     """
     Scan all pages and return the one most likely to contain swatches.
     Raises NoSwatchPageError if no page scores above MIN_SWATCH_SCORE.
     """
     n = len(fitz.open(stream=pdf_bytes, filetype="pdf"))
     logger.info(f"Scanning {n} pages for swatch page...")
+
+    # Stage 1: OpenCV scores every page (free, eliminates obvious non-candidates)
     scores = []
     for i in range(n):
         s = _score_page(pdf_bytes, i)
         scores.append((s, i))
         logger.info(f"  Page {i}: score={s:.0f}")
+
     best_score, best_page = max(scores)
-    logger.info(f"Swatch page: {best_page} (score={best_score:.0f})")
-    if best_score < MIN_SWATCH_SCORE:
+
+    # Stage 2: Filter to candidates above minimum threshold
+    candidates = [(s, i) for s, i in scores if s >= MIN_SWATCH_SCORE]
+    if not candidates:
         raise NoSwatchPageError(
             f"No swatch spec page found in this PDF "
             f"(best page {best_page} scored {best_score:.0f}, minimum is {MIN_SWATCH_SCORE}). "
             f"This PDF appears to contain only product photography or text pages."
         )
-    return best_page
+
+    # Stage 3: Decision
+    if len(candidates) == 1:
+        # Only one candidate — no ambiguity, skip Gemini
+        winner = candidates[0][1]
+        logger.info(f"Swatch page: {winner} (single candidate, score={candidates[0][0]:.0f})")
+        return winner
+
+    # Multiple candidates: use Gemini to make the final visual call
+    if gemini_key:
+        logger.info(
+            f"{len(candidates)} candidates above threshold — asking Gemini to pick "
+            f"(pages {[i for _, i in sorted(candidates, key=lambda x: -x[0])[:3]]})"
+        )
+        gemini_choice = _gemini_pick_page(pdf_bytes, candidates, gemini_key)
+        if gemini_choice is not None:
+            logger.info(f"Swatch page: {gemini_choice} (Gemini + OpenCV hybrid)")
+            return gemini_choice
+        logger.info("Gemini pick failed — falling back to OpenCV best score")
+
+    # No Gemini key or Gemini failed: use highest OpenCV score
+    winner = best_page
+    logger.info(f"Swatch page: {winner} (OpenCV score={best_score:.0f})")
+    return winner
 
 
 # ── Render ────────────────────────────────────────────────────────────────────
@@ -395,6 +423,88 @@ def _gemini_read_labels(img_rgb: np.ndarray, gemini_key: str) -> list[str] | Non
         return None
 
 
+# ── Gemini page picker ────────────────────────────────────────────────────────
+
+def _gemini_pick_page(
+    pdf_bytes: bytes,
+    candidates: list[tuple[float, int]],   # [(score, page_num), ...]
+    gemini_key: str,
+) -> int | None:
+    """
+    Send up to 3 candidate pages to Gemini as images in one API call.
+    Ask: "which page is the material/finish swatch spec page?"
+    Returns the winning page_num, or None if the call fails.
+
+    This is a VISUAL UNDERSTANDING question — Gemini is reliable for this.
+    One API call regardless of how many candidates.
+    """
+    try:
+        from google import genai as ggenai
+        client = ggenai.Client(api_key=gemini_key)
+
+        # Sort by OpenCV score descending, take top 3
+        top = sorted(candidates, key=lambda x: -x[0])[:3]
+        page_nums = [pn for _, pn in top]
+
+        # Render each candidate at low resolution
+        parts = []
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        for i, pn in enumerate(page_nums, start=1):
+            pix = doc[pn].get_pixmap(matrix=fitz.Matrix(LOW, LOW))
+            img_np = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+                pix.height, pix.width, pix.n
+            )
+            buf = io.BytesIO()
+            Image.fromarray(img_np).save(buf, format="PNG")
+            parts.append(ggenai.types.Part.from_bytes(
+                data=buf.getvalue(), mime_type="image/png"
+            ))
+            parts.append(f"(Image {i} = catalog page {pn})")
+
+        prompt = (
+            f"I am showing you {len(page_nums)} pages from a furniture catalog.\n"
+            "One of them is the material/finish options spec page that shows:\n"
+            "  - Color/finish sample swatches (circles or squares)\n"
+            "  - Short product codes like P15, SKZ, Cod.50, GTG, T3H\n"
+            "  - Section labels like Frame, Fabric, Leather, Ceramic, Glass\n\n"
+            f"Which image number (1 to {len(page_nums)}) is the swatch spec page?\n"
+            "If none of them are a swatch spec page, answer 0.\n"
+            "Answer with a single digit only — nothing else."
+        )
+        parts.append(prompt)
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=parts,
+        )
+
+        answer = response.text.strip()
+        # Extract the first digit from the answer
+        digit_match = re.search(r"\d", answer)
+        if not digit_match:
+            logger.warning(f"Gemini page pick: unexpected answer '{answer}'")
+            return None
+
+        choice = int(digit_match.group())
+        if choice == 0:
+            logger.info("Gemini page pick: answered 0 (no swatch page)")
+            return None
+        if choice < 1 or choice > len(page_nums):
+            logger.warning(f"Gemini page pick: out-of-range answer '{choice}'")
+            return None
+
+        selected = page_nums[choice - 1]
+        logger.info(
+            f"Gemini page pick: chose image {choice} = catalog page {selected} "
+            f"(from candidates {page_nums})"
+        )
+        return selected
+
+    except Exception as e:
+        logger.warning(f"Gemini page pick failed ({e}) — using OpenCV best score")
+        return None
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def extract_swatches(
@@ -413,7 +523,7 @@ def extract_swatches(
         gemini_key:   Free from aistudio.google.com
     """
     if page_num is None:
-        page_num = find_swatch_page(pdf_bytes)
+        page_num = find_swatch_page(pdf_bytes, gemini_key=gemini_key)
     else:
         logger.info(f"Using explicit page: {page_num}")
 
