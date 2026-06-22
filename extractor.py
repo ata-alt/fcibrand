@@ -49,6 +49,7 @@ DPI     = 250
 SCALE   = DPI / 72.0
 PADDING = 8
 LOW     = 150 / 72.0   # low-res scale used for page scanning only
+_GEMINI_MODEL = "gemini-2.5-flash"  # update here if model is deprecated
 
 
 # ── Swatch code recogniser ────────────────────────────────────────────────────
@@ -309,9 +310,21 @@ def _opencv_extract(img_rgb, img_bgr, words, gemini_labels=None) -> list:
         return []
 
     # Use Gemini-identified labels if available, otherwise fall back to regex
+    gemini_label_map = {}   # label → lowest pdfplumber token for that label
     if gemini_labels is not None:
-        label_tokens = [w for w in words if w['text'] in gemini_labels]
-        logger.info(f"Swatch label candidates (Gemini): {[w['text'] for w in label_tokens]}")
+        # Fuzzy match: pdfplumber token starts-with the Gemini label
+        # (handles "Cod.50//" matching Gemini label "Cod.50")
+        # Keep only the LOWEST occurrence (highest top value) per label —
+        # actual swatch labels sit at the bottom, body-text refs are higher.
+        for w in words:
+            raw = w['text'].rstrip('/').rstrip('.')
+            for gl in gemini_labels:
+                if raw == gl or w['text'].startswith(gl):
+                    if gl not in gemini_label_map or w['top'] > gemini_label_map[gl]['top']:
+                        gemini_label_map[gl] = w
+        label_tokens = list(gemini_label_map.values())
+        logger.info(f"Swatch label candidates (Gemini, lowest): "
+                    f"{[w['text'] for w in label_tokens]}")
     else:
         label_tokens = [w for w in words if _is_swatch_code(w['text'])]
         logger.info(f"Swatch label candidates (regex): {[w['text'] for w in label_tokens]}")
@@ -371,6 +384,47 @@ def _opencv_extract(img_rgb, img_bgr, words, gemini_labels=None) -> list:
         ))
 
     logger.info(f"OpenCV matched {len(results)} swatches")
+
+    # ── Region crop for Gemini labels with no matched circle ──────────────────
+    # Some brands use square/rectangular swatch photos (not circles).
+    # When a Gemini label has no matched circle, crop the region ABOVE the
+    # label text — that's where the swatch sample image sits.
+    if gemini_labels and gemini_label_map:
+        matched_labels = {r.label for r in results}
+        for gl, w in gemini_label_map.items():
+            if gl in matched_labels:
+                continue   # already extracted as a circle
+
+            # Crop centre: 45pts above the label text, same x as label
+            lx_pts  = (w['x0'] + w['x1']) / 2
+            ly_pts  = w['top']
+            cy_pts  = ly_pts - 45          # swatch sample is above the label
+            cx_px   = int(lx_pts * SCALE)
+            cy_px   = int(cy_pts * SCALE)
+            crop_r  = int(38 * SCALE / 3)  # ~38pts radius at 250 DPI
+
+            x1r = max(0,                cx_px - crop_r)
+            y1r = max(0,                cy_px - crop_r)
+            x2r = min(img_rgb.shape[1], cx_px + crop_r)
+            y2r = min(img_rgb.shape[0], cy_px + crop_r)
+
+            if x2r - x1r < 10 or y2r - y1r < 10:
+                continue
+
+            buf = io.BytesIO()
+            Image.fromarray(img_rgb[y1r:y2r, x1r:x2r]).save(buf, format="PNG")
+
+            roi_tops = [v['top'] * SCALE for v in gemini_label_map.values()]
+            cat = _category(cy_px, words,
+                            int(min(roi_tops)) - 100,
+                            int(max(roi_tops)) + 100)
+
+            results.append(SwatchResult(
+                label=gl, category=cat,
+                image_bytes=buf.getvalue(), confidence="region",
+            ))
+            logger.info(f"Region crop for unmatched label: {gl}")
+
     return results
 
 
@@ -412,7 +466,7 @@ def _gemini_read_labels(img_rgb: np.ndarray, gemini_key: str) -> list[str] | Non
         )
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=_GEMINI_MODEL,
             contents=[
                 ggenai.types.Part.from_bytes(data=image_bytes, mime_type="image/png"),
                 prompt,
@@ -491,7 +545,7 @@ def _gemini_pick_page(
         parts.append(prompt)
 
         response = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=_GEMINI_MODEL,
             contents=parts,
         )
 
