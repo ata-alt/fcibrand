@@ -2,16 +2,33 @@
 Swatch Extractor
 =================
 Language-agnostic. Works for Italian, German, English, French catalogs.
-Handles any page position — auto-detects swatch page via:
-  - Rows of 3+ uniform circles (swatch grid fingerprint)
-  - Unique product codes present (P15, GTB, SKZ etc.)
-  Both signals must be strong — prevents caption pages from winning.
+Handles any page position — auto-detects swatch page via a 3-stage hybrid:
+
+  Stage 1 — OpenCV eliminates non-candidates (free, instant)
+    Each page scored using circle-row density + unique product codes.
+    Photo pages, schematic pages, cover pages → eliminated immediately.
+
+  Stage 2 — Decision gate (no API cost)
+    0 candidates above threshold → NoSwatchPageError raised immediately.
+    1 candidate                  → returned directly, Gemini not called.
+    2-3 candidates               → proceed to Stage 3.
+
+  Stage 3 — Gemini visual confirmation (one API call, only when ambiguous)
+    Top candidates sent as images in a single call.
+    Gemini answers: "which image is the material/finish spec page?" → single digit.
+    If Gemini unavailable or fails → falls back to OpenCV best score silently.
 
 Pipeline:
-  1. Auto-detect swatch page
-  2. OpenCV HoughCircles on full-res render
-  3. Label matching via is_swatch_code filter
-  4. Gemini 2.0 Flash fallback if OpenCV undershoots
+  1. find_swatch_page()   — hybrid OpenCV + Gemini page detection (see above)
+  2. _render()            — render selected page at 250 DPI via PyMuPDF
+  3. _gemini_read_labels() — Gemini reads swatch codes as text (if key provided)
+  4. _opencv_extract()    — HoughCircles finds circles; label matching assigns codes
+     - With Gemini labels: uses Gemini-identified codes as whitelist
+     - Without Gemini key: uses _is_swatch_code() regex as fallback
+
+Gemini is used for what it does well (reading text, visual understanding).
+OpenCV is used for what it does well (finding circle positions, pixel coords).
+Neither depends on the other — each falls back gracefully if unavailable.
 """
 
 import io, re, json, base64, logging
