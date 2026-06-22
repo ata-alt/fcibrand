@@ -1,13 +1,17 @@
 """
 Swatch Extractor
 =================
-Fully language-agnostic — works for Italian, German, English, French catalogs.
-No hardcoded section heading keywords anywhere.
+Language-agnostic. Works for Italian, German, English, French catalogs.
+Handles any page position — auto-detects swatch page via:
+  - Rows of 3+ uniform circles (swatch grid fingerprint)
+  - Unique product codes present (P15, GTB, SKZ etc.)
+  Both signals must be strong — prevents caption pages from winning.
 
 Pipeline:
-  1. Auto-detect swatch page (scores every page — no page=0 assumption)
-  2. OpenCV HoughCircles with is_swatch_code label filter
-  3. Gemini 2.0 Flash fallback if OpenCV undershoots threshold
+  1. Auto-detect swatch page
+  2. OpenCV HoughCircles on full-res render
+  3. Label matching via is_swatch_code filter
+  4. Gemini 2.0 Flash fallback if OpenCV undershoots
 """
 
 import io, re, json, base64, logging
@@ -27,35 +31,47 @@ except ImportError:
 DPI     = 250
 SCALE   = DPI / 72.0
 PADDING = 8
+LOW     = 150 / 72.0   # low-res scale used for page scanning only
+
 
 # ── Swatch code recogniser ────────────────────────────────────────────────────
-# Language-agnostic: identifies product codes by shape, not by catalogue keywords.
 
 _STOP = {
-    'Made','Order','Being','Note','View','More',
-    'Frame','Struttura','Gestell','Structure',
-    'Seat','Sedile','Sitz','Assise',
+    # English common words that pass TitleCase filter
+    'The','And','For','With','Its','Are','Was','Has','Had','Not',
+    'Here','There','This','That','From','Also','Some','Such',
+    'More','Each','Only','Both','Same','They','Their','Will','Been',
+    # Italian/French/German common words
+    'Qui','Con','Per','Nel','Una','Uno','Del','Dei','Delle','Che',
+    'Tavolo','Tavola','Piano','Sedia','Sedie','Poltrona',
+    'Bett','Tisch','Stuhl','Sofa',
+    # Furniture model/product names that match TitleCase but are NOT codes
+    'Flair','Vully','Atlas','Gemini','Tuka','Etienne','Mid',
+    'Semi','Easy','Cross','Lama','Nova','Luna','Star',
+    # Section headings
+    'Frame','Struttura','Gestell','Structure','Base','Basamento',
+    'Seat','Sedile','Sitz','Assise','Top',
     'Dimensions','Dimensioni','Abmessungen',
     'Metal','Metallo','Fabric','Tessuto','Stoff','Tissu',
     'Leather','Similpelle','Kunstleder','Cuir',
-    'Wood','Legno','Holz','Bois',
-    'Base','Top','Sedia','Poltr','Tavol','Stuhl','Tisch',
-    'Sofa','Bett','Chaise','Table',
+    'Wood','Legno','Holz','Bois','Glass','Vetro',
+    'Stone','Pietra','Ceramic','Ceramica',
+    'Made','Order','Note','View','More',
 }
 
 def _is_swatch_code(text: str) -> bool:
-    """True if text looks like a swatch/finish code rather than prose."""
+    """True if text looks like a finish/material code rather than prose."""
     t = text.strip().rstrip('.')
     if len(t) < 2 or len(t) > 8:           return False
     if t in _STOP:                          return False
-    if ',' in t or '.' in t:               return False   # dimension values: H78,5
-    if re.match(r'^CB\d+', t):             return False   # SKU codes: CB2348
+    if ',' in t or '.' in t:               return False
+    if re.match(r'^CB\d+', t):             return False   # SKUs: CB2348
     if re.match(r'^[HS][HX]?\d+', t):     return False   # H97, SH65
-    if re.match(r'^\d+$', t):             return False   # page numbers: 180
-    if re.search(r'\d', t):               return True    # P15, T3H, P38M, P151
-    if t.isupper() and 2 <= len(t) <= 5:  return True    # SKZ, SLA, SLB
+    if re.match(r'^\d+$', t):             return False   # page numbers
+    if re.search(r'\d', t):               return True    # P15, T3H, P2C
+    if t.isupper() and 2 <= len(t) <= 5:  return True    # GTG, SKZ, GMA
     if t[0].isupper() and t[1:].islower() and 3 <= len(t) <= 6:
-        return True                                       # Cros, Harry, Vero
+        return True                                       # Cros, Harry
     return False
 
 
@@ -77,17 +93,33 @@ class SwatchResult:
         self.width, self.height = img.size
 
 
-# ── Page auto-detection ───────────────────────────────────────────────────────
+# ── Page scoring ──────────────────────────────────────────────────────────────
+
+def _count_swatch_rows(circles_np) -> int:
+    """Count rows of 3+ circles — the fingerprint of a swatch grid."""
+    if circles_np is None or len(circles_np) == 0:
+        return 0
+    c = sorted(circles_np.tolist(), key=lambda x: x[1])
+    rows, cur = [], [c[0]]
+    for ci in c[1:]:
+        if ci[1] - cur[-1][1] > 25:
+            rows.append(cur); cur = [ci]
+        else:
+            cur.append(ci)
+    rows.append(cur)
+    return len([r for r in rows if len(r) >= 3])
+
 
 def _score_page(pdf_bytes: bytes, page_num: int) -> float:
     """
     Score page for swatch likelihood.
-    Signal: consistent-radius circles + short product codes.
-    No language keywords used.
+    Both signals required: circle rows AND unique product codes.
+    Caption pages have codes but few circle rows → score lower.
+    Photo pages have circle rows but no codes → score lower.
     """
-    doc  = fitz.open(stream=pdf_bytes, filetype="pdf")
-    pix  = doc[page_num].get_pixmap(matrix=fitz.Matrix(150/72, 150/72))
-    img  = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+    pix = doc[page_num].get_pixmap(matrix=fitz.Matrix(LOW, LOW))
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     gray = cv2.cvtColor(cv2.cvtColor(img, cv2.COLOR_RGB2BGR), cv2.COLOR_BGR2GRAY)
 
     circles = cv2.HoughCircles(
@@ -98,32 +130,23 @@ def _score_page(pdf_bytes: bytes, page_num: int) -> float:
     with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
         words = pdf.pages[page_num].extract_words()
 
-    total_words   = len(words)
-    swatch_tokens = sum(1 for w in words if _is_swatch_code(w['text']))
-
-    # Hard-disqualify full-bleed photo pages
+    total_words = len(words)
     if total_words < 8:
-        return -999.0
+        return -999.0   # full-bleed photo page
 
-    score = float(swatch_tokens * 20)  # strongest signal
+    unique_codes = len(set(w['text'] for w in words if _is_swatch_code(w['text'])))
+    swatch_rows  = _count_swatch_rows(circles[0] if circles is not None else None)
 
-    if circles is not None:
-        radii     = circles[0][:, 2]
-        r_std     = float(np.std(radii))
-        n         = len(circles[0])
-        # Low radius variance = swatch grid; high variance = photo
-        if r_std < 3:   score += n * 5
-        elif r_std < 6: score += n * 2
-        else:           score -= n * 1.0
-
+    # Both signals must be present — multiply to require both
+    score = float(swatch_rows * 25 + unique_codes * 15)
     if total_words > 300:
-        score -= 30
+        score -= 40   # text-heavy pages are unlikely swatch pages
 
     return score
 
 
 def find_swatch_page(pdf_bytes: bytes) -> int:
-    """Return page number most likely to contain swatches."""
+    """Scan all pages and return the one most likely to contain swatches."""
     n = len(fitz.open(stream=pdf_bytes, filetype="pdf"))
     logger.info(f"Scanning {n} pages for swatch page...")
     scores = []
@@ -147,16 +170,19 @@ def _render(pdf_bytes: bytes, page_num: int):
     return img, cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
 
 
-# ── Category from heading above circle ───────────────────────────────────────
+# ── Category assignment ───────────────────────────────────────────────────────
 
 _CAT_KW = {
-    'frame':        ['frame','struttura','gestell','structure','base','metal',
-                     'metallo','stahl','acier','acero'],
+    'frame':        ['frame','struttura','gestell','structure','base','basamento',
+                     'metal','metallo','stahl','acier','acero'],
     'fabric':       ['fabric','tessuto','stoff','tissu','tejido','upholstery'],
     'faux_leather': ['faux','leather','similpelle','kunstleder','simili','cuir',
                      'ecopelle','cuero'],
     'wood':         ['wood','legno','holz','bois','madera','oak','walnut','noce'],
     'lacquer':      ['lacquer','lacca','lack','laque','laca','laccato'],
+    'ceramic':      ['ceramic','ceramica','keramik','céramique'],
+    'glass':        ['glass','vetro','glas','verre','vidrio'],
+    'glass_stone':  ['stone','pietra','stein','pierre'],
 }
 
 def _category(cy_px: float, words: list, roi_y1: int, roi_y2: int) -> str:
@@ -167,7 +193,6 @@ def _category(cy_px: float, words: list, roi_y1: int, roi_y2: int) -> str:
         for cat, kws in _CAT_KW.items():
             if any(kw in tok for kw in kws):
                 return cat
-    # Positional fallback: thirds of ROI
     span = max(roi_y2 - roi_y1, 1)
     rel  = (cy_px - roi_y1) / span
     if rel < 0.33:   return 'frame'
@@ -175,9 +200,9 @@ def _category(cy_px: float, words: list, roi_y1: int, roi_y2: int) -> str:
     return 'faux_leather'
 
 
-# ── Main extraction ───────────────────────────────────────────────────────────
+# ── OpenCV extraction ─────────────────────────────────────────────────────────
 
-def _opencv_extract(img_rgb, img_bgr, words) -> list[SwatchResult]:
+def _opencv_extract(img_rgb, img_bgr, words) -> list:
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
 
     circles = cv2.HoughCircles(
@@ -191,8 +216,6 @@ def _opencv_extract(img_rgb, img_bgr, words) -> list[SwatchResult]:
     label_tokens = [w for w in words if _is_swatch_code(w['text'])]
     logger.info(f"Swatch label candidates: {[w['text'] for w in label_tokens]}")
 
-    # Derive ROI from circles that actually have labels
-    # (avoids committing to a y-range before we know which circles are real)
     def find_label(cx, cy, used):
         cx_pts, cy_pts = cx / SCALE, cy / SCALE
         best, bd = None, float('inf')
@@ -206,9 +229,9 @@ def _opencv_extract(img_rgb, img_bgr, words) -> list[SwatchResult]:
                     bd, best = d, w
         return best
 
-    results  = []
-    used_ids = set()
-    matched_ys = []
+    results     = []
+    used_ids    = set()
+    matched_ys  = []
 
     for (cx, cy, r) in sorted(np.round(circles[0]).astype(int), key=lambda x: x[0]):
         token = find_label(int(cx), int(cy), used_ids)
@@ -217,12 +240,12 @@ def _opencv_extract(img_rgb, img_bgr, words) -> list[SwatchResult]:
         used_ids.add(id(token))
         matched_ys.append(int(cy))
 
-        roi_y1 = min(matched_ys) - 100 if matched_ys else 0
-        roi_y2 = max(matched_ys) + 100 if matched_ys else img_bgr.shape[0]
-        cat = _category(int(cy), words, roi_y1, roi_y2)
+        roi_y1 = min(matched_ys) - 100
+        roi_y2 = max(matched_ys) + 100
+        cat    = _category(int(cy), words, roi_y1, roi_y2)
 
-        x1 = max(0,               int(cx) - r - PADDING)
-        y1 = max(0,               int(cy) - r - PADDING)
+        x1 = max(0,                int(cx) - r - PADDING)
+        y1 = max(0,                int(cy) - r - PADDING)
         x2 = min(img_rgb.shape[1], int(cx) + r + PADDING)
         y2 = min(img_rgb.shape[0], int(cy) + r + PADDING)
 
@@ -240,12 +263,11 @@ def _opencv_extract(img_rgb, img_bgr, words) -> list[SwatchResult]:
 
 # ── Gemini fallback ───────────────────────────────────────────────────────────
 
-def _gemini_extract(img_rgb: np.ndarray, gemini_key: str) -> list[SwatchResult]:
+def _gemini_extract(img_rgb: np.ndarray, gemini_key: str) -> list:
     try:
         import google.generativeai as genai
         genai.configure(api_key=gemini_key)
         model = genai.GenerativeModel("gemini-2.0-flash")
-
         buf = io.BytesIO()
         Image.fromarray(img_rgb).save(buf, format="PNG")
         response = model.generate_content([
@@ -253,11 +275,10 @@ def _gemini_extract(img_rgb: np.ndarray, gemini_key: str) -> list[SwatchResult]:
             "Find all color/material swatch circles on this furniture catalog page. "
             "Return ONLY JSON array, no markdown:\n"
             '[{"label":"P15","category":"frame","x1":100,"y1":200,"x2":155,"y2":255}]\n'
-            "category: frame | fabric | faux_leather | wood | lacquer | other"
+            "category: frame | fabric | faux_leather | wood | lacquer | ceramic | glass | glass_stone | other"
         ])
         raw        = re.sub(r"```(?:json)?|```", "", response.text).strip()
         detections = json.loads(raw)
-
         results = []
         for d in detections:
             x1 = max(0, d['x1'] - PADDING);  y1 = max(0, d['y1'] - PADDING)
@@ -284,14 +305,14 @@ def extract_swatches(
     page_num:     Optional[int] = None,
     expected_min: int  = 3,
     gemini_key:   Optional[str] = None,
-) -> list[SwatchResult]:
+) -> list:
     """
     Extract swatch images from any furniture catalog PDF.
 
     Args:
         pdf_bytes:    Raw PDF bytes
-        page_num:     Explicit page (0-indexed). None = auto-detect.
-        expected_min: Trigger Gemini fallback if OpenCV finds fewer.
+        page_num:     Explicit 0-indexed page, or None for auto-detect
+        expected_min: Trigger Gemini fallback if OpenCV finds fewer
         gemini_key:   Free from aistudio.google.com
     """
     if page_num is None:
