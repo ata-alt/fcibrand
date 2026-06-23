@@ -7,7 +7,6 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 from processor import process_image
-from canvas_filler import fill_canvas
 from extractor import extract_swatches, NoSwatchPageError
 from logger_config import setup_logger
 
@@ -30,10 +29,6 @@ IMAGE_TYPE_MAP = {
     "lifestyle":          False,  # skip trim, background intentional
 }
 
-# image types where white padding will exist after processor
-# → canvas filler runs automatically on these
-NEEDS_FILL = {"studio_clean_light", "studio_shadow"}
-
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
     image:               str
@@ -46,8 +41,6 @@ class ProcessRequest(BaseModel):
     portrait_padding:    int  = Field(default=1,    ge=0,   le=200)
     square_padding:      int  = Field(default=1,    ge=0,   le=200)
     sharpen:             bool  = True
-    focus_x:             float = Field(default=0.5, ge=0.0, le=1.0)  # ← from Gemini
-    focus_y:             float = Field(default=0.5, ge=0.0, le=1.0)  # ← from Gemini
 
 # ── Health check ───────────────────────────────────────────
 @app.get("/")
@@ -74,12 +67,9 @@ def process(req: ProcessRequest):
             )
 
         trim_white  = IMAGE_TYPE_MAP[image_type]
-        should_fill = image_type in NEEDS_FILL
 
         logger.info(f"Received request — image_type: {image_type} | "
                     f"trim_white: {trim_white} | "
-                    f"canvas_fill: {should_fill} | "
-                    f"focus_x: {req.focus_x} | focus_y: {req.focus_y} | "
                     f"target_size: {req.target_size} | "
                     f"landscape_padding: {req.landscape_padding} | "
                     f"portrait_padding: {req.portrait_padding} | "
@@ -97,28 +87,14 @@ def process(req: ProcessRequest):
             trim_white        = trim_white,
         )
 
-        # ── Stage 2: Fill canvas (remove white padding) ────────
-        if should_fill:
-            logger.info("STAGE 2 — Running canvas filler...")
-            base64_image = fill_canvas(
-                image_input = base64_image,
-                target_size = req.target_size,
-                focus_x     = req.focus_x,  # ← from Gemini
-                focus_y     = req.focus_y,  # ← from Gemini
-            )
-            logger.info("STAGE 2 — Canvas filler done")
-        else:
-            logger.info("STAGE 2 — SKIPPED | studio_clean handles its own trim")
-
         return {
-            "success":       True,
-            "image":         base64_image,
-            "format":        "JPEG",
-            "size":          req.target_size,
-            "dpi":           72,
-            "image_type":    image_type,
-            "trim_white":    trim_white,
-            "canvas_filled": should_fill,
+            "success":    True,
+            "image":      base64_image,
+            "format":     "JPEG",
+            "size":       req.target_size,
+            "dpi":        72,
+            "image_type": image_type,
+            "trim_white": trim_white,
         }
 
     except Exception as e:
