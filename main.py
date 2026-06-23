@@ -45,7 +45,8 @@ class ProcessRequest(BaseModel):
     landscape_padding:   int  = Field(default=0,    ge=0,   le=200)
     portrait_padding:    int  = Field(default=1,    ge=0,   le=200)
     square_padding:      int  = Field(default=1,    ge=0,   le=200)
-    sharpen:             bool = True
+    sharpen:             bool  = True
+    focus_y:             float = Field(default=0.5, ge=0.0, le=1.0)  # ← from Gemini
 
 # ── Health check ───────────────────────────────────────────
 @app.get("/")
@@ -77,6 +78,7 @@ def process(req: ProcessRequest):
         logger.info(f"Received request — image_type: {image_type} | "
                     f"trim_white: {trim_white} | "
                     f"canvas_fill: {should_fill} | "
+                    f"focus_y: {req.focus_y} | "
                     f"target_size: {req.target_size} | "
                     f"landscape_padding: {req.landscape_padding} | "
                     f"portrait_padding: {req.portrait_padding} | "
@@ -101,7 +103,7 @@ def process(req: ProcessRequest):
                 image_input = base64_image,
                 target_size = req.target_size,
                 focus_x     = 0.5,
-                focus_y     = 0.5,
+                focus_y     = req.focus_y,  # ← from Gemini
             )
             logger.info("STAGE 2 — Canvas filler done")
         else:
