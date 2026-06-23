@@ -7,6 +7,7 @@ from fastapi.responses import PlainTextResponse, StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
 from typing import Optional
 from processor import process_image
+from canvas_filler import fill_canvas
 from extractor import extract_swatches, NoSwatchPageError
 from logger_config import setup_logger
 
@@ -28,6 +29,10 @@ IMAGE_TYPE_MAP = {
     "studio_shadow":      False,  # skip trim, preserve shadow
     "lifestyle":          False,  # skip trim, background intentional
 }
+
+# image types where white padding will exist after processor
+# → canvas filler runs automatically on these
+NEEDS_FILL = {"studio_clean_light", "studio_shadow", "lifestyle"}
 
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
@@ -53,7 +58,6 @@ def health_check():
 def process(req: ProcessRequest):
     try:
         # ── Determine which image_type field is True ───────────
-        # OpenClaw sends booleans — exactly one should be True
         image_type = None
         for field in ["studio_clean", "studio_clean_light", "studio_shadow", "lifestyle"]:
             if getattr(req, field) is True:
@@ -67,16 +71,19 @@ def process(req: ProcessRequest):
                 "studio_shadow, lifestyle to be true."
             )
 
-        trim_white = IMAGE_TYPE_MAP[image_type]
+        trim_white  = IMAGE_TYPE_MAP[image_type]
+        should_fill = image_type in NEEDS_FILL
 
         logger.info(f"Received request — image_type: {image_type} | "
                     f"trim_white: {trim_white} | "
+                    f"canvas_fill: {should_fill} | "
                     f"target_size: {req.target_size} | "
                     f"landscape_padding: {req.landscape_padding} | "
                     f"portrait_padding: {req.portrait_padding} | "
                     f"square_padding: {req.square_padding} | "
                     f"sharpen: {req.sharpen}")
 
+        # ── Stage 1: Process image ─────────────────────────────
         base64_image = process_image(
             image_input       = req.image,
             target_size       = req.target_size,
@@ -87,14 +94,28 @@ def process(req: ProcessRequest):
             trim_white        = trim_white,
         )
 
+        # ── Stage 2: Fill canvas (remove white padding) ────────
+        if should_fill:
+            logger.info("STAGE 2 — Running canvas filler...")
+            base64_image = fill_canvas(
+                image_input = base64_image,
+                target_size = req.target_size,
+                focus_x     = 0.5,
+                focus_y     = 0.5,
+            )
+            logger.info("STAGE 2 — Canvas filler done")
+        else:
+            logger.info("STAGE 2 — SKIPPED | studio_clean handles its own trim")
+
         return {
-            "success":    True,
-            "image":      base64_image,
-            "format":     "JPEG",
-            "size":       req.target_size,
-            "dpi":        72,
-            "image_type": image_type,
-            "trim_white": trim_white
+            "success":       True,
+            "image":         base64_image,
+            "format":        "JPEG",
+            "size":          req.target_size,
+            "dpi":           72,
+            "image_type":    image_type,
+            "trim_white":    trim_white,
+            "canvas_filled": should_fill,
         }
 
     except Exception as e:
