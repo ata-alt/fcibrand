@@ -32,7 +32,7 @@ IMAGE_TYPE_MAP = {
 
 # image types where white padding will exist after processor
 # → canvas filler runs automatically on these
-NEEDS_FILL = {"studio_clean_light", "studio_shadow", "lifestyle"}
+NEEDS_FILL = {"studio_clean_light", "studio_shadow"}
 
 # ── Request model ──────────────────────────────────────────
 class ProcessRequest(BaseModel):
