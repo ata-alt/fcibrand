@@ -363,7 +363,7 @@ def _opencv_extract(img_rgb, img_bgr, words, gemini_labels=None) -> list:
         crop_g    = np.array(Image.fromarray(img_rgb[y1c:y2c, x1c:x2c]).convert('L'))
         white_pct = float((crop_g > 220).sum()) / max(crop_g.size, 1)
         std_val   = float(crop_g.std())
-        if white_pct > 0.65 and std_val > 42:
+        if white_pct > 0.65 and std_val > 38:
             continue   # text on white paper, not a color swatch
 
         token = find_label(int(cx), int(cy), used_ids)
