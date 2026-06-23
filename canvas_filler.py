@@ -20,7 +20,9 @@ def fill_canvas(
     Returns base64 encoded JPEG string at same target_size and 72 DPI.
 
     focus_x / focus_y : normalised focal point (0.0–1.0)
-                        default 0.5, 0.5 = centre (correct for product photography)
+                        defaults are orientation-aware (see Step 5):
+                        portrait  → focus_y = 0.4 (protects base of product)
+                        landscape → focus_y = 0.5 (geometric centre)
     """
 
     logger.info("=" * 60)
